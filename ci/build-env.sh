@@ -9,7 +9,7 @@ echo "=== Toolchain ==="
 cat rust-toolchain.toml
 
 export DOCKER_BUILDKIT=1
-export GHCR_ORG=xline-kv
+export GHCR_ORG=mintgreentz
 export BUILD_TAG="ghcr.io/${GHCR_ORG}/build-env:latest"
 
 # Change this version if rust-rocksdb updates in `engine`

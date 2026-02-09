@@ -7,7 +7,7 @@ metadata:
 spec:
   containers:
     - name: xline
-      image: ghcr.io/xline-kv/xline:master
+      image: ghcr.io/mintgreentz/xline:master
       imagePullPolicy: IfNotPresent
       command:
         - /bin/sh

@@ -68,7 +68,7 @@ jobs:
           bash ./${{ inputs.script_name }}
 
       - name: Upload logs
-        if: ${{ inputs.uploadLogs }} && (failure() || cancelled())
+        if: ${{ inputs.uploadLogs && (failure() || cancelled()) }}
         uses: actions/upload-artifact@v4
         with:
           name: Xline logs

@@ -198,7 +198,7 @@ run_container() {
     size=${1}
     case ${2} in
     xline)
-        image="ghcr.io/xline-kv/xline:latest"
+        image="ghcr.io/mintgreentz/xline:latest"
         ;;
     etcd)
         image="datenlord/etcd:v3.5.5"
