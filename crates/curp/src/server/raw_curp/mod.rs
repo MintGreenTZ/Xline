@@ -11,7 +11,7 @@
 
 use std::{
     cmp::{self, min},
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::Debug,
     sync::{
         atomic::{AtomicU64, AtomicU8, Ordering},
@@ -152,7 +152,7 @@ pub(super) struct RawCurpArgs<C: Command, RC: RoleChange> {
     /// Tx to send entries to after_sync
     as_tx: flume::Sender<TaskType<C>>,
     /// Response Senders
-    resp_txs: Arc<Mutex<HashMap<LogIndex, Arc<ResponseSender>>>>,
+    resp_txs: RespTxQueue,
     /// Barrier for waiting unsynced commands
     id_barrier: Arc<IdBarrier<ProposeId>>,
 }
@@ -347,9 +347,8 @@ struct Context<C: Command, RC: RoleChange> {
     uncommitted_pool: Arc<Mutex<UncommittedPool<C>>>,
     /// Tx to send entries to after_sync
     as_tx: flume::Sender<TaskType<C>>,
-    /// Response Senders
-    // TODO: this could be replaced by a queue
-    resp_txs: Arc<Mutex<HashMap<LogIndex, Arc<ResponseSender>>>>,
+    /// Response senders, queued in log-index order
+    resp_txs: RespTxQueue,
     /// Barrier for waiting unsynced commands
     id_barrier: Arc<IdBarrier<ProposeId>>,
 }
@@ -476,6 +475,9 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     }
 }
 
+/// Queue of response senders keyed by log index
+type RespTxQueue = Arc<Mutex<VecDeque<(LogIndex, Arc<ResponseSender>)>>>;
+
 /// Term, entries
 type AppendEntriesSuccess<C> = (u64, Vec<Arc<LogEntry<C>>>);
 /// Term, index
@@ -550,7 +552,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         let mut log_entries = Vec::with_capacity(proposes.len());
         let mut to_process = Vec::with_capacity(proposes.len());
         let mut log_w = self.log.write();
-        self.ctx.resp_txs.map_lock(|mut tx_map| {
+        self.ctx.resp_txs.map_lock(|mut tx_queue| {
             for propose in proposes {
                 let (cmd, id, _term, resp_tx) = propose;
                 let entry = log_w.push(term, id, cmd);
@@ -558,10 +560,7 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 let conflict = resp_tx.is_conflict();
                 to_process.push((index, conflict));
                 log_entries.push(entry);
-                assert!(
-                    tx_map.insert(index, Arc::clone(&resp_tx)).is_none(),
-                    "Should not insert resp_tx twice"
-                );
+                tx_queue.push_back((index, Arc::clone(&resp_tx)));
             }
         });
         self.entry_process_multi(&mut log_w, &to_process, term);
@@ -1905,7 +1904,11 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                     log.last_log_index()
                 )
             });
-            let tx = resp_txs_l.remove(&i);
+            let tx = if resp_txs_l.front().map_or(false, |&(idx, ref _tx)| idx == i) {
+                resp_txs_l.pop_front().map(|(_, tx)| tx)
+            } else {
+                None
+            };
             entries.push((Arc::clone(entry), tx));
             log.last_as = i;
             if log.last_exe < log.last_as {

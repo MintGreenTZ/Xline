@@ -59,8 +59,11 @@
   - File: `crates/curp/src/server/raw_curp/mod.rs:1297`
   - If a follower is down for a long time, a buffered local snapshot could help.
 
-- [ ] **TODO: Replace connect list with a proper queue**
+- [x] **TODO: Replace connect list with a proper queue**
   - File: `crates/curp/src/server/raw_curp/mod.rs:351`
+  - **Fixed:** Replaced `HashMap<LogIndex, Arc<ResponseSender>>` with `VecDeque<(LogIndex, Arc<ResponseSender>)>`
+    (type-aliased as `RespTxQueue`). Insertions use `push_back()` in `push_logs()`, and removals
+    use conditional `pop_front()` in `apply()` — matching the sequential log-index access pattern.
 
 ## Medium Priority
 
