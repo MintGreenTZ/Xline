@@ -117,8 +117,11 @@
     computed from `CurpConfig`. The `State` struct now stores `election_timeout` and passes it to
     `promote()` on election win. Default: 300ms * 5 = 1500ms (was 1000ms).
 
-- [ ] **TODO: Return only SyncResponse from lease_store**
+- [x] **TODO: Return only SyncResponse from lease_store**
   - File: `crates/xline/src/storage/lease_store/mod.rs:117`
+  - **Fixed:** Changed `after_sync` return type from `Result<(SyncResponse, Vec<WriteOp>), ExecuteError>`
+    to `Result<SyncResponse, ExecuteError>` since lease operations never produce write ops. The caller
+    in `command.rs` now wraps the lease branch result with `(asr, vec![])` to match the other backends.
 
 - [ ] **TODO: Some requests allowed without token when auth enabled**
   - File: `crates/xline/src/storage/auth_store/store.rs:948`

@@ -102,7 +102,7 @@ impl LeaseStore {
         revision_gen: &RevisionNumberGeneratorState<'_>,
         txn_db: &T,
         index: &I,
-    ) -> Result<(SyncResponse, Vec<WriteOp>), ExecuteError>
+    ) -> Result<SyncResponse, ExecuteError>
     where
         T: XlineStorageOps + TransactionApi,
         I: IndexOperate,
@@ -114,8 +114,7 @@ impl LeaseStore {
         } else {
             revision_gen.get()
         };
-        // TODO: return only a `SyncResponse`
-        Ok((SyncResponse::new(rev), vec![]))
+        Ok(SyncResponse::new(rev))
     }
 
     /// Get lease by id
@@ -393,7 +392,6 @@ mod test {
         storage::{
             db::DB,
             index::{Index, IndexState},
-            storage_api::XlineStorageOps,
         },
     };
 
@@ -467,8 +465,7 @@ mod test {
             "the future should block until the lease is synced"
         );
 
-        let (_ignore, ops) = lease_store.after_sync(&req1, &rev_gen_state, &txn, &index)?;
-        lease_store.db.write_ops(ops)?;
+        let _ignore = lease_store.after_sync(&req1, &rev_gen_state, &txn, &index)?;
         lease_store.mark_lease_synced(&req1);
 
         assert!(
@@ -488,8 +485,7 @@ mod test {
             "the future should block until the lease is synced"
         );
 
-        let (_ignore, ops) = lease_store.after_sync(&req2, &rev_gen_state, &txn, &index)?;
-        lease_store.db.write_ops(ops)?;
+        let _ignore = lease_store.after_sync(&req2, &rev_gen_state, &txn, &index)?;
         lease_store.mark_lease_synced(&req2);
 
         assert!(
@@ -547,7 +543,7 @@ mod test {
     ) -> Result<ResponseWrapper, ExecuteError> {
         let cmd_res = ls.execute(req)?;
         let txn = ls.db.transaction();
-        let (_ignore, _ops) = ls.after_sync(req, rev_gen, &txn, &index)?;
+        let _ignore = ls.after_sync(req, rev_gen, &txn, &index)?;
         txn.commit()
             .map_err(|e| ExecuteError::DbError(e.to_string()))?;
         index.commit();

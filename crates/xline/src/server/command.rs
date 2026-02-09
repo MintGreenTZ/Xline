@@ -327,8 +327,10 @@ impl CommandExecutor {
         let (asr, wr_ops) = match wrapper {
             x if x.is_auth_backend() => self.auth_storage.after_sync(wrapper, auth_revision)?,
             x if x.is_lease_backend() => {
-                self.lease_storage
-                    .after_sync(wrapper, general_revision, txn_db, index)?
+                let asr = self
+                    .lease_storage
+                    .after_sync(wrapper, general_revision, txn_db, index)?;
+                (asr, vec![])
             }
             x if x.is_alarm_backend() => self.alarm_storage.after_sync(wrapper, general_revision),
             _ => unreachable!("Should not sync kv commands"),
