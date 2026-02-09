@@ -291,11 +291,14 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
         if proposes.is_empty() {
             return;
         }
+        let fast_path_ready = curp.fast_path_ready();
         let pool_entries = proposes
             .iter()
             .map(|p| PoolEntry::new(p.id, Arc::clone(&p.cmd)));
         let conflicts = curp.leader_record(pool_entries);
         for (p, conflict) in proposes.iter().zip(conflicts) {
+            // If the leader hasn't committed its term's no-op yet, force slow path.
+            let conflict = conflict || !fast_path_ready;
             info!("handle mutative cmd: {:?}, conflict: {conflict}", p.cmd);
             p.resp_tx.set_conflict(conflict);
         }
@@ -1227,9 +1230,12 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> Debug for CurpNode<C, C
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use curp_test_utils::{
         mock_role_change, sleep_secs,
         test_cmd::{TestCE, TestCommand},
+        TEST_CLIENT_ID,
     };
     use tracing_test::traced_test;
 
@@ -1376,5 +1382,55 @@ mod tests {
         sleep_secs(3).await;
         assert!(curp.is_leader());
         task_manager.shutdown(true).await;
+    }
+
+    #[traced_test]
+    #[test]
+    fn fast_path_requires_no_op_applied() {
+        let task_manager = Arc::new(TaskManager::new());
+        let curp = Arc::new(RawCurp::new_test(
+            3,
+            mock_role_change(),
+            Arc::clone(&task_manager),
+        ));
+        curp.set_term_for_test(2);
+
+        let (tx, _rx) = flume::bounded(1);
+        let resp_tx = Arc::new(ResponseSender::new(tx));
+        let propose = Propose {
+            cmd: Arc::new(TestCommand::new_put(vec![1], 0)),
+            id: ProposeId(TEST_CLIENT_ID, 0),
+            term: curp.term(),
+            resp_tx: Arc::clone(&resp_tx),
+        };
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_c = Arc::clone(&executed);
+        CurpNode::<TestCommand, TestCE, _>::handle_mutatives(
+            move |_entry| executed_c.store(true, Ordering::Relaxed),
+            &curp,
+            vec![propose],
+        );
+        assert!(resp_tx.is_conflict());
+        assert!(!executed.load(Ordering::Relaxed));
+
+        curp.set_no_op_applied();
+
+        let (tx2, _rx2) = flume::bounded(1);
+        let resp_tx2 = Arc::new(ResponseSender::new(tx2));
+        let propose2 = Propose {
+            cmd: Arc::new(TestCommand::new_put(vec![2], 0)),
+            id: ProposeId(TEST_CLIENT_ID, 1),
+            term: curp.term(),
+            resp_tx: Arc::clone(&resp_tx2),
+        };
+        let second_executed = Arc::new(AtomicBool::new(false));
+        let second_executed_clone = Arc::clone(&second_executed);
+        CurpNode::<TestCommand, TestCE, _>::handle_mutatives(
+            move |_entry| second_executed_clone.store(true, Ordering::Relaxed),
+            &curp,
+            vec![propose2],
+        );
+        assert!(!resp_tx2.is_conflict());
+        assert!(second_executed.load(Ordering::Relaxed));
     }
 }

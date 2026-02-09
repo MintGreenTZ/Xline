@@ -120,6 +120,11 @@ impl NoOpState {
         self.applied.store(false, Ordering::Release);
     }
 
+    /// Whether the no-op entry has been applied
+    fn is_applied(&self) -> bool {
+        self.applied.load(Ordering::Acquire)
+    }
+
     /// Waits for the no-op log to be applied
     fn wait(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         if self.applied.load(Ordering::Acquire) {
@@ -281,6 +286,11 @@ impl LeaderState {
     /// Waits for the no-op log to be applied
     pub(super) fn wait_no_op_applied(&self) -> impl Future<Output = ()> + Send {
         self.no_op_state.wait()
+    }
+
+    /// Whether the no-op entry has been applied
+    pub(super) fn no_op_applied(&self) -> bool {
+        self.no_op_state.is_applied()
     }
 }
 

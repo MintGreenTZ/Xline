@@ -612,6 +612,11 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         Box::new(self.lst.wait_no_op_applied())
     }
 
+    /// Whether fast path can be used (no-op for this term is applied)
+    pub(super) fn fast_path_ready(&self) -> bool {
+        self.lst.no_op_applied()
+    }
+
     /// Sets the no-op log as applied
     pub(super) fn set_no_op_applied(&self) {
         self.lst.set_no_op_applied();
@@ -1694,6 +1699,8 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         assert_ne!(prev_role, Role::Leader, "leader can't start election");
 
         st.term += 1;
+        // Entering a new term requires a fresh no-op before we allow fast-path service.
+        self.lst.reset_no_op_state();
         st.role = Role::Candidate;
         st.voted_for = Some(self.id());
         st.leader_id = None;
