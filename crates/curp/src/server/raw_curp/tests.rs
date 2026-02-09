@@ -137,6 +137,11 @@ impl RawCurp<TestCommand, TestRoleChange> {
                     && cst_l.config.voters().contains(&1) != is_learner
             })
     }
+
+    /// Set term for testing purposes (keeps leader role)
+    pub(crate) fn set_term_for_test(&self, term: u64) {
+        self.st.write().term = term;
+    }
 }
 
 /*************** tests for propose **************/
@@ -949,4 +954,114 @@ fn leader_will_reset_transferee_after_it_become_follower() {
 
     curp.update_to_term_and_become_follower(&mut *curp.st.write(), 2);
     assert!(curp.get_transferee().is_none());
+}
+
+/*************** tests for verify_install_snapshot **************/
+
+#[traced_test]
+#[test]
+fn verify_install_snapshot_accepts_when_snapshot_ahead() {
+    // Follower has log at (index=0, term=0), snapshot is at (index=5, term=3)
+    let task_manager = Arc::new(TaskManager::new());
+    let curp = Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager));
+    curp.update_to_term_and_become_follower(&mut *curp.st.write(), 1);
+    let s1_id = curp.cluster().get_id_by_name("S1").unwrap();
+    assert!(curp.verify_install_snapshot(1, s1_id, 5, 3));
+}
+
+#[traced_test]
+#[test]
+fn verify_install_snapshot_accepts_same_index_and_term() {
+    // Follower has log at (index=5, term=3) via base, snapshot also at (index=5, term=3)
+    let task_manager = Arc::new(TaskManager::new());
+    let curp = Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager));
+    curp.update_to_term_and_become_follower(&mut *curp.st.write(), 3);
+    {
+        let mut log_w = curp.log.write();
+        log_w.base_index = 5;
+        log_w.base_term = 3;
+    }
+    assert!(curp.verify_install_snapshot(3, curp.id(), 5, 3));
+}
+
+#[traced_test]
+#[test]
+fn verify_install_snapshot_rejects_when_behind() {
+    // Follower has log at (index=10, term=3), snapshot is at (index=5, term=3)
+    let task_manager = Arc::new(TaskManager::new());
+    let curp = Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager));
+    curp.update_to_term_and_become_follower(&mut *curp.st.write(), 3);
+    {
+        let mut log_w = curp.log.write();
+        log_w.base_index = 10;
+        log_w.base_term = 3;
+    }
+    let s1_id = curp.cluster().get_id_by_name("S1").unwrap();
+    assert!(!curp.verify_install_snapshot(3, s1_id, 5, 3));
+}
+
+#[traced_test]
+#[test]
+fn verify_install_snapshot_accepts_higher_term() {
+    // Follower has log at (index=10, term=2), snapshot is at (index=5, term=3)
+    // Higher term wins regardless of index.
+    let task_manager = Arc::new(TaskManager::new());
+    let curp = Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager));
+    curp.update_to_term_and_become_follower(&mut *curp.st.write(), 2);
+    {
+        let mut log_w = curp.log.write();
+        log_w.base_index = 10;
+        log_w.base_term = 2;
+    }
+    let s1_id = curp.cluster().get_id_by_name("S1").unwrap();
+    assert!(curp.verify_install_snapshot(3, s1_id, 5, 3));
+}
+
+#[traced_test]
+#[test]
+fn verify_install_snapshot_rejects_lower_term() {
+    // Follower has log at (index=3, term=5), snapshot is at (index=10, term=2)
+    // Lower term loses regardless of index.
+    let task_manager = Arc::new(TaskManager::new());
+    let curp = Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager));
+    curp.update_to_term_and_become_follower(&mut *curp.st.write(), 5);
+    {
+        let mut log_w = curp.log.write();
+        log_w.base_index = 3;
+        log_w.base_term = 5;
+    }
+    let s1_id = curp.cluster().get_id_by_name("S1").unwrap();
+    assert!(!curp.verify_install_snapshot(5, s1_id, 10, 2));
+}
+
+#[traced_test]
+#[test]
+fn verify_install_snapshot_calibrates_term() {
+    // Follower at term 1, snapshot arrives with term 3 — should step up
+    let task_manager = Arc::new(TaskManager::new());
+    let curp = Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager));
+    curp.update_to_term_and_become_follower(&mut *curp.st.write(), 1);
+    let s1_id = curp.cluster().get_id_by_name("S1").unwrap();
+    assert!(curp.verify_install_snapshot(3, s1_id, 5, 3));
+    let st_r = curp.st.read();
+    assert_eq!(st_r.term, 3);
+    assert_eq!(st_r.leader_id, Some(s1_id));
+}
+
+#[traced_test]
+#[test]
+fn verify_install_snapshot_with_entries_ahead_of_snapshot() {
+    // Follower has entries up to (index=8, term=3) — higher than snapshot
+    // (index=5, term=3). Same term, follower ahead → reject.
+    let task_manager = Arc::new(TaskManager::new());
+    let curp = Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager));
+    curp.update_to_term_and_become_follower(&mut *curp.st.write(), 3);
+    // Push entries to extend the follower's log
+    curp.push_cmd(ProposeId(TEST_CLIENT_ID, 0), Arc::new(TestCommand::default()));
+    curp.push_cmd(ProposeId(TEST_CLIENT_ID, 1), Arc::new(TestCommand::default()));
+    // entries are at index 1,2 with term 3; plus base at (0,0)
+    // last_log_index = 2, last_log_term = 3
+    let s1_id = curp.cluster().get_id_by_name("S1").unwrap();
+    // snapshot at (index=1, term=3) — behind follower's last index
+    assert!(!curp.verify_install_snapshot(3, s1_id, 1, 3));
 }

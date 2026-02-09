@@ -1112,6 +1112,10 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     }
 
     /// Verify `install_snapshot` request
+    ///
+    /// Accepts the snapshot if its (term, index) is at or ahead of the
+    /// follower's log, using standard Raft log ordering: compare terms first,
+    /// then indices within the same term.
     pub(super) fn verify_install_snapshot(
         &self,
         term: u64,
@@ -1125,9 +1129,13 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             st_w.leader_id = Some(leader_id);
         }
         let log_r = self.log.read();
-        // FIXME: is this correct
-        let validate = log_r.last_log_index() < last_included_index
-            && log_r.last_log_term() <= last_included_term;
+        let follower_term = log_r.last_log_term();
+        let follower_index = log_r.last_log_index();
+        // Accept the snapshot if it is not behind the follower's log.
+        // A snapshot is "not behind" when its term is higher, or when
+        // terms are equal and its index is >= the follower's index.
+        let validate = last_included_term > follower_term
+            || (last_included_term == follower_term && last_included_index >= follower_index);
         if validate {
             self.reset_election_tick();
         }

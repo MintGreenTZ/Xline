@@ -6,6 +6,7 @@ on:
       - master
   pull_request:
     types: [opened, synchronize, reopened]
+  workflow_dispatch: {}
 
 jobs:
   test:
@@ -17,7 +18,7 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       CARGO_INCREMENTAL: 0 # CI will compile all crates from beginning. So disable incremental compile may reduce compile target size.
     container:
-      image: ghcr.io/xline-kv/build-env:latest
+      image: ghcr.io/mintgreentz/build-env:latest
       volumes:
         - /usr/local/lib/android/:/tmp/android/
         - /usr/share/dotnet:/tmp/dotnet
@@ -65,7 +66,11 @@ jobs:
         run: ci/scripts/check-trailing-spaces.sh
 
       - name: Audit
-        run: cargo audit
+        # RUSTSEC-2024-0437 (protobuf v2): transitive dep from opentelemetry-prometheus.
+        # RUSTSEC-2026-0009 (time <0.3.47): fix requires edition 2024 (MSRV 1.82).
+        # RUSTSEC-2024-0421 (idna <1.0): fix requires url >=2.5.4 which needs rustc 1.82.
+        # All three are blocked by the project's Rust 1.74.0 MSRV.
+        run: cargo audit --ignore RUSTSEC-2024-0437 --ignore RUSTSEC-2026-0009 --ignore RUSTSEC-2024-0421
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -114,10 +119,9 @@ jobs:
         with:
           fetch-depth: 0
       - run: git show-ref
-      - uses: actions-rs/install@v0.1
-        with:
-          crate: git-cz
-          version: latest
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install git-cz
+        run: cargo install git-cz --locked
       - name: Validate commit messages
         run: git-cz check ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
 
@@ -143,12 +147,20 @@ jobs:
 
       - name: Build xline image
         run: |
-          docker run -q --rm -v $(pwd):/xline \
+          docker_build() {
+            docker run -q --rm -v $(pwd):/xline \
+              "$@" \
+              ghcr.io/mintgreentz/build-env:latest \
+              cargo build --release --bin xline --bin benchmark
+          }
+
+          if ! docker_build \
             -e SCCACHE_GHA_ENABLED=on \
             -e ACTIONS_CACHE_URL=${ACTIONS_CACHE_URL} \
-            -e ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN} \
-            ghcr.io/xline-kv/build-env:latest \
-            cargo build --release --bin xline --bin benchmark
+            -e ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}; then
+            echo "sccache GHA cache unavailable; retrying build without sccache."
+            docker_build -e RUSTC_WRAPPER= -e SCCACHE_GHA_ENABLED=off
+          fi
 
           sudo apt-get install -y --force-yes expect
           cd scripts
@@ -156,12 +168,12 @@ jobs:
           ldd ./xline
           ldd ./benchmark
           cp ../fixtures/{private,public}.pem .
-          docker build . -t ghcr.io/xline-kv/xline:master
+          docker build . -t ghcr.io/mintgreentz/xline:master
 
           cd ..
           pwd
           mkdir -p _output
-          docker save -o _output/xline.tar ghcr.io/xline-kv/xline:master
+          docker save -o _output/xline.tar ghcr.io/mintgreentz/xline:master
           ls _output
 
       - uses: actions/upload-artifact@v4
@@ -189,7 +201,7 @@ jobs:
 
       - name: Build kind node image with xline
         run: |
-          docker build . -f ci/artifacts/kind-node-xline.Dockerfile -t ghcr.io/xline-kv/kind-node-xline:${{ matrix.k8s }}-master --build-arg K8S_VERSION=${{ matrix.k8s }}
+          docker build . -f ci/artifacts/kind-node-xline.Dockerfile -t ghcr.io/mintgreentz/kind-node-xline:${{ matrix.k8s }}-master --build-arg K8S_VERSION=${{ matrix.k8s }}
 
       - name: Create kubernetes cluster with kind
         env:
