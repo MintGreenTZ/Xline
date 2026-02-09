@@ -1057,8 +1057,14 @@ fn verify_install_snapshot_with_entries_ahead_of_snapshot() {
     let curp = Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager));
     curp.update_to_term_and_become_follower(&mut *curp.st.write(), 3);
     // Push entries to extend the follower's log
-    curp.push_cmd(ProposeId(TEST_CLIENT_ID, 0), Arc::new(TestCommand::default()));
-    curp.push_cmd(ProposeId(TEST_CLIENT_ID, 1), Arc::new(TestCommand::default()));
+    curp.push_cmd(
+        ProposeId(TEST_CLIENT_ID, 0),
+        Arc::new(TestCommand::default()),
+    );
+    curp.push_cmd(
+        ProposeId(TEST_CLIENT_ID, 1),
+        Arc::new(TestCommand::default()),
+    );
     // entries are at index 1,2 with term 3; plus base at (0,0)
     // last_log_index = 2, last_log_term = 3
     let s1_id = curp.cluster().get_id_by_name("S1").unwrap();
