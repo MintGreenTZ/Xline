@@ -2,12 +2,11 @@
 
 ## Urgent
 
-- [ ] **Pass CI in `fix/consistency-problem-when-start-fast-path-too-early` branch**
+- [x] **Pass CI in `fix/consistency-problem-when-start-fast-path-too-early` branch**
   - [x] Fixed: cargo audit failures — updated deps (bytes, crossbeam-channel, hashbrown, ring,
     tracing-subscriber) and added `--ignore` for 3 MSRV-blocked advisories (protobuf, time, idna)
   - [x] Fixed: snapshot validation logic (FIXME in raw_curp/mod.rs:1128) with 7 unit tests
-  - [ ] Remaining: commit message validation (3 commits use `[Fix]`/`[Update]` format instead of
-    conventional `type: description`) — may need interactive rebase to fix
+  - [x] Fixed: commit messages — squashed 8 commits into 4 well-formed conventional commits
 
 ## High Priority
 
