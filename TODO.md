@@ -47,8 +47,13 @@
   - File: `crates/curp/src/server/raw_curp/mod.rs:1843`
   - Current dedup approach needs improvement.
 
-- [ ] **TODO: Disable dedup for read-only or commutative commands**
+- [x] **TODO: Disable dedup for read-only or commutative commands**
   - File: `crates/curp/src/server/curp_node.rs:267`
+  - **Fixed (read-only part):** Read-only commands now skip the duplicate cached-result path in
+    `propose_stream()`. Dedup tracking still runs (for GC), but duplicate read-only commands
+    proceed to fresh re-execution instead of returning stale cached results. Commutative
+    command support is left for a future task (requires adding `is_commutative()` to the
+    `Command` trait).
 
 - [ ] **TODO: Buffer local snapshots for long-down followers**
   - File: `crates/curp/src/server/raw_curp/mod.rs:1297`

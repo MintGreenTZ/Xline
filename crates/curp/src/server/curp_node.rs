@@ -96,15 +96,14 @@ impl<C> Propose<C>
 where
     C: Command,
 {
-    /// Attempts to create a new `Propose` from request
-    fn try_new(req: &ProposeRequest, resp_tx: Arc<ResponseSender>) -> Result<Self, CurpError> {
-        let cmd: Arc<C> = Arc::new(req.cmd()?);
-        Ok(Self {
+    /// Creates a new `Propose` with an already-decoded command
+    fn new(cmd: Arc<C>, id: ProposeId, term: u64, resp_tx: Arc<ResponseSender>) -> Self {
+        Self {
             cmd,
-            id: req.propose_id(),
-            term: req.term,
+            id,
+            term,
             resp_tx,
-        })
+        }
     }
 
     /// Returns `true` if the proposed command is read-only
@@ -177,16 +176,25 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
             self.curp.mark_client_id_bypassed(req.propose_id().0);
         }
 
+        let cmd: Arc<C> = Arc::new(req.cmd()?);
+        let is_read_only = cmd.is_read_only();
+
         match self
             .curp
             .deduplicate(req.propose_id(), Some(req.first_incomplete))
         {
-            // If the propose is duplicated, return the result directly
-            Err(CurpError::Duplicated(())) => {
+            // For non-read-only duplicates, return the cached result.
+            // Read-only commands skip the cached result because each read
+            // should reflect the latest state.
+            Err(CurpError::Duplicated(())) if !is_read_only => {
                 let (er, asr) =
                     CommandBoard::wait_for_er_asr(&self.cmd_board, req.propose_id()).await;
                 resp_tx.send_propose(ProposeResponse::new_result::<C>(&er, true));
                 resp_tx.send_synced(SyncedResponse::new_result::<C>(&asr));
+            }
+            Err(CurpError::Duplicated(())) | Ok(()) => {
+                // Read-only duplicate: skip cached result, proceed to re-execution.
+                // Ok: first occurrence, proceed normally.
             }
             Err(CurpError::ExpiredClientId(())) => {
                 metrics::get()
@@ -195,10 +203,9 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
                 return Err(CurpError::expired_client_id());
             }
             Err(_) => unreachable!("deduplicate won't return other type of errors"),
-            Ok(()) => {}
         }
 
-        let propose = Propose::try_new(req, resp_tx)?;
+        let propose = Propose::new(cmd, req.propose_id(), req.term, resp_tx);
         let _ignore = self.propose_tx.send(propose);
 
         Ok(())
@@ -264,7 +271,6 @@ impl<C: Command, CE: CommandExecutor<C>, RC: RoleChange> CurpNode<C, CE, RC> {
     {
         for propose in proposes {
             info!("handle read only cmd: {:?}", propose.cmd);
-            // TODO: Disable dedup if the command is read only or commute
             let Propose {
                 cmd, resp_tx, id, ..
             } = propose;
@@ -1382,6 +1388,52 @@ mod tests {
         sleep_secs(3).await;
         assert!(curp.is_leader());
         task_manager.shutdown(true).await;
+    }
+
+    #[traced_test]
+    #[test]
+    fn read_only_propose_is_correctly_identified() {
+        let get_cmd = Arc::new(TestCommand::new_get(vec![1]));
+        let put_cmd = Arc::new(TestCommand::new_put(vec![1], 0));
+
+        let (tx1, _rx1) = flume::bounded(1);
+        let resp_tx1 = Arc::new(ResponseSender::new(tx1));
+        let read_propose = Propose::new(get_cmd, ProposeId(TEST_CLIENT_ID, 0), 1, resp_tx1);
+        assert!(read_propose.is_read_only());
+
+        let (tx2, _rx2) = flume::bounded(1);
+        let resp_tx2 = Arc::new(ResponseSender::new(tx2));
+        let write_propose = Propose::new(put_cmd, ProposeId(TEST_CLIENT_ID, 1), 1, resp_tx2);
+        assert!(!write_propose.is_read_only());
+    }
+
+    #[traced_test]
+    #[test]
+    fn dedup_still_tracks_read_only_commands_for_gc() {
+        let task_manager = Arc::new(TaskManager::new());
+        let curp = Arc::new(RawCurp::new_test(
+            3,
+            mock_role_change(),
+            Arc::clone(&task_manager),
+        ));
+
+        // TEST_CLIENT_ID (12345) is already bypassed in LeaseManager,
+        // so check_alive returns true without needing to grant a lease.
+
+        // First call records seq_num 0 — not a duplicate
+        let result = curp.deduplicate(ProposeId(TEST_CLIENT_ID, 0), Some(0));
+        assert!(result.is_ok());
+
+        // Second call with same seq_num 0 — is a duplicate
+        let result = curp.deduplicate(ProposeId(TEST_CLIENT_ID, 0), Some(0));
+        assert!(
+            matches!(result, Err(CurpError::Duplicated(()))),
+            "expected Duplicated error for repeated seq_num"
+        );
+
+        // Record seq_num 1 — not a duplicate
+        let result = curp.deduplicate(ProposeId(TEST_CLIENT_ID, 1), Some(0));
+        assert!(result.is_ok());
     }
 
     #[traced_test]
