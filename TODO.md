@@ -2,11 +2,13 @@
 
 ## Urgent
 
-- [x] **Pass CI in `fix/consistency-problem-when-start-fast-path-too-early` branch**
+- [ ] **Pass CI in `fix/consistency-problem-when-start-fast-path-too-early` branch**
   - [x] Fixed: cargo audit failures — updated deps (bytes, crossbeam-channel, hashbrown, ring,
     tracing-subscriber) and added `--ignore` for 3 MSRV-blocked advisories (protobuf, time, idna)
   - [x] Fixed: snapshot validation logic (FIXME in raw_curp/mod.rs:1128) with 7 unit tests
   - [x] Fixed: commit messages — squashed 8 commits into 4 well-formed conventional commits
+  - [x] Fixed: `cargo sort` — reordered sections in `curp/Cargo.toml` and `xline-client/Cargo.toml`
+  - [ ] Remaining: sccache build failure — transient GitHub Actions cache outage (HTTP 400), needs CI re-run
 
 ## High Priority
 
@@ -101,9 +103,11 @@
 
 ### Storage / Xline Server
 
-- [ ] **TODO: Lease extend should use election timeout, not hardcoded 1s**
+- [x] **TODO: Lease extend should use election timeout, not hardcoded 1s**
   - File: `crates/xline/src/state.rs:29`
-  - `self.lease_storage.promote(Duration::from_secs(1))` should use election timeout.
+  - **Fixed:** Replaced hardcoded `Duration::from_secs(1)` with `heartbeat_interval * follower_timeout_ticks`
+    computed from `CurpConfig`. The `State` struct now stores `election_timeout` and passes it to
+    `promote()` on election win. Default: 300ms * 5 = 1500ms (was 1000ms).
 
 - [ ] **TODO: Return only SyncResponse from lease_store**
   - File: `crates/xline/src/storage/lease_store/mod.rs:117`

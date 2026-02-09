@@ -502,9 +502,11 @@ impl XlineServer {
 
         let auto_compactor_c = auto_compactor.clone();
 
-        let state = State::new(Arc::clone(&lease_storage), auto_compactor);
-
         let curp_config = Arc::new(self.cluster_config.curp_config().clone());
+        let election_timeout = curp_config
+            .heartbeat_interval
+            .saturating_mul(u32::from(curp_config.follower_timeout_ticks));
+        let state = State::new(Arc::clone(&lease_storage), auto_compactor, election_timeout);
 
         let curp_server = CurpServer::new(
             Arc::clone(&self.cluster_info),

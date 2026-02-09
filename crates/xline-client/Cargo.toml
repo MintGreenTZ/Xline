@@ -28,10 +28,10 @@ utils = { path = "../utils", features = ["parking_lot"] }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 xlineapi = { path = "../xlineapi" }
 
+[build-dependencies]
+tonic-build = { version = "0.5.0", package = "madsim-tonic-build" }
+
 [dev-dependencies]
 rand = "0.8.5"
 test-macros = { path = "../test-macros" }
 xline-test-utils = { path = "../xline-test-utils" }
-
-[build-dependencies]
-tonic-build = { version = "0.5.0", package = "madsim-tonic-build" }

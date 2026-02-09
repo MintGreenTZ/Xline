@@ -9,6 +9,9 @@ name = "curp"
 readme = "README.md"
 repository = "https://github.com/xline-kv/Xline/tree/master/curp"
 version = "0.1.0"
+
+[features]
+client-metrics = []
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -50,6 +53,10 @@ tracing = { version = "0.1.37", features = ["std", "log", "attributes"] }
 utils = { path = "../utils", version = "0.1.0", features = ["parking_lot"] }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
+[build-dependencies]
+prost-build = "0.13.0"
+tonic-build = { version = "0.5.0", package = "madsim-tonic-build" }
+
 [dev-dependencies]
 anyhow = "1.0.90"
 curp-test-utils = { path = "../curp-test-utils" }
@@ -60,10 +67,3 @@ tempfile = "3"
 test-macros = { path = "../test-macros" }
 tracing-subscriber = { version = "0.3.16", features = ["env-filter", "time"] }
 tracing-test = "0.2.4"
-
-[build-dependencies]
-prost-build = "0.13.0"
-tonic-build = { version = "0.5.0", package = "madsim-tonic-build" }
-
-[features]
-client-metrics = []
