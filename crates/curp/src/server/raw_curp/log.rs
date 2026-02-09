@@ -120,6 +120,8 @@ pub(super) struct Log<C: Command> {
     pub(super) fallback_contexts: HashMap<LogIndex, FallbackContext<C>>,
     /// Entries to keep in memory
     entries_cap: usize,
+    /// Cached set of propose IDs for O(1) dedup lookups
+    cmd_ids: HashSet<ProposeId>,
 }
 
 /// Context of fallback conf change entry
@@ -156,6 +158,9 @@ impl<C: Command> Log<C> {
     /// the rest.
     /// `batch_end` will keep len elem
     fn truncate(&mut self, len: usize) {
+        for entry in self.entries.iter().skip(len) {
+            let _was_present = self.cmd_ids.remove(&entry.inner.propose_id);
+        }
         self.entries.truncate(len);
         self.batch_end.truncate(len);
         let last_index = if len == 0 { return } else { len - 1 };
@@ -211,6 +216,7 @@ impl<C: Command> Log<C> {
             warn!("entry_size of an entry > batch_limit, which may be too small.",);
         }
 
+        let _already_present = self.cmd_ids.insert(inner.propose_id);
         self.entries.push_back(Entry { inner, size });
         self.batch_end.push_back(0); // placeholder
         self.cur_batch_size += size;
@@ -239,6 +245,7 @@ impl<C: Command> Log<C> {
     /// pop a log entry from the front of queue
     fn pop_front(&mut self) -> Option<Arc<LogEntry<C>>> {
         if let Some(entry) = self.entries.pop_front() {
+            let _was_present = self.cmd_ids.remove(&entry.inner.propose_id);
             if self.first_idx_in_cur_batch == 0 {
                 self.cur_batch_size -= entry.size;
             } else {
@@ -261,6 +268,7 @@ impl<C: Command> Log<C> {
 
         self.cur_batch_size = 0;
         self.first_idx_in_cur_batch = 0;
+        self.cmd_ids.clear();
 
         for entry in entries {
             let entry = Arc::from(entry);
@@ -276,6 +284,7 @@ impl<C: Command> Log<C> {
         self.batch_end.clear();
         self.cur_batch_size = 0;
         self.first_idx_in_cur_batch = 0;
+        self.cmd_ids.clear();
     }
 
     /// Get the range [left, right) of the log entry, whose size should be equal or smaller than `batch_limit`
@@ -336,6 +345,7 @@ impl<C: Command> Log<C> {
             last_exe: 0,
             fallback_contexts: HashMap::new(),
             entries_cap,
+            cmd_ids: HashSet::new(),
         }
     }
 
@@ -443,7 +453,6 @@ impl<C: Command> Log<C> {
     }
 
     /// Push a log entry into the end of log
-    // FIXME: persistent other log entries
     // TODO: Avoid allocation during locking
     pub(super) fn push(
         &mut self,
@@ -481,12 +490,9 @@ impl<C: Command> Log<C> {
             .collect_vec()
     }
 
-    /// Get existing cmd ids
-    pub(super) fn get_cmd_ids(&self) -> HashSet<ProposeId> {
-        self.entries
-            .iter()
-            .map(|entry| entry.inner.propose_id)
-            .collect()
+    /// Check if a command with the given propose id exists in the log
+    pub(super) fn contains_cmd_id(&self, id: &ProposeId) -> bool {
+        self.cmd_ids.contains(id)
     }
 
     /// Get previous log entry's term and index
@@ -892,5 +898,113 @@ mod tests {
         assert_eq!(log.first_idx_in_cur_batch, 0);
         assert_eq!(log.cur_batch_size, 6);
         assert_eq!(log.batch_end, VecDeque::from(vec![0, 0]));
+    }
+
+    #[test]
+    fn cmd_ids_cache_tracks_entries_through_lifecycle() {
+        let mut log = Log::<TestCommand>::new(default_batch_max_size(), 10);
+
+        // push entries and verify cache tracks them
+        for i in 0..5 {
+            log.push(0, ProposeId(0, i), Arc::new(TestCommand::default()));
+            assert!(log.contains_cmd_id(&ProposeId(0, i)));
+        }
+        assert!(!log.contains_cmd_id(&ProposeId(0, 99)));
+
+        // compact removes front entries from cache
+        log.last_as = 4;
+        log.last_exe = 4;
+        log.compact();
+        // entries at the front should have been removed by compaction (if entries_cap allows)
+        // With entries_cap=10 and 5 entries and last_as=4, no compaction happens since
+        // 4 - 1 < 10. Let's force more entries to trigger compaction.
+        for i in 5..25 {
+            log.push(0, ProposeId(0, i), Arc::new(TestCommand::default()));
+        }
+        log.last_as = 22;
+        log.last_exe = 22;
+        log.compact();
+        // After compaction, base_index moves forward, front entries are removed
+        assert!(log.base_index > 0);
+        // Entries that were compacted should no longer be in the cache
+        assert!(!log.contains_cmd_id(&ProposeId(0, 0)));
+        // Entries still in the log should be in the cache
+        assert!(log.contains_cmd_id(&ProposeId(0, 24)));
+
+        // clear removes all entries from cache
+        log.clear();
+        for i in 0..25 {
+            assert!(!log.contains_cmd_id(&ProposeId(0, i)));
+        }
+    }
+
+    #[test]
+    fn cmd_ids_cache_updated_on_truncate() {
+        let mut log = Log::<TestCommand>::new(default_batch_max_size(), default_log_entries_cap());
+        let result = log.try_append_entries(
+            vec![
+                LogEntry::new(1, 1, ProposeId(0, 1), Arc::new(TestCommand::default())),
+                LogEntry::new(2, 1, ProposeId(0, 2), Arc::new(TestCommand::default())),
+                LogEntry::new(3, 1, ProposeId(0, 3), Arc::new(TestCommand::default())),
+            ],
+            0,
+            0,
+        );
+        assert!(result.is_ok());
+
+        assert!(log.contains_cmd_id(&ProposeId(0, 1)));
+        assert!(log.contains_cmd_id(&ProposeId(0, 2)));
+        assert!(log.contains_cmd_id(&ProposeId(0, 3)));
+
+        // Append conflicting entries that truncate log from index 2 onward
+        let result = log.try_append_entries(
+            vec![
+                LogEntry::new(2, 2, ProposeId(0, 4), Arc::new(TestCommand::default())),
+                LogEntry::new(3, 2, ProposeId(0, 5), Arc::new(TestCommand::default())),
+            ],
+            1,
+            1,
+        );
+        assert!(result.is_ok());
+
+        // Old entries that were truncated should be gone from cache
+        assert!(log.contains_cmd_id(&ProposeId(0, 1)));
+        assert!(!log.contains_cmd_id(&ProposeId(0, 2)));
+        assert!(!log.contains_cmd_id(&ProposeId(0, 3)));
+        // New entries should be in cache
+        assert!(log.contains_cmd_id(&ProposeId(0, 4)));
+        assert!(log.contains_cmd_id(&ProposeId(0, 5)));
+    }
+
+    #[test]
+    fn cmd_ids_cache_updated_on_restore() {
+        let mut log = Log::<TestCommand>::new(default_batch_max_size(), default_log_entries_cap());
+
+        // Push some initial entries
+        for i in 0..3 {
+            log.push(1, ProposeId(0, i), Arc::new(TestCommand::default()));
+        }
+
+        // Restore with different entries
+        let entries = (10..15)
+            .map(|i| {
+                LogEntry::new(
+                    i - 9,
+                    1,
+                    ProposeId(0, i),
+                    Arc::new(TestCommand::default()),
+                )
+            })
+            .collect();
+        log.restore_entries(entries).unwrap();
+
+        // Old entries should be gone
+        for i in 0..3 {
+            assert!(!log.contains_cmd_id(&ProposeId(0, i)));
+        }
+        // New entries should be present
+        for i in 10..15 {
+            assert!(log.contains_cmd_id(&ProposeId(0, i)));
+        }
     }
 }

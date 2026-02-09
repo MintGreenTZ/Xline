@@ -19,6 +19,17 @@
   - The state of `ctx.cluster_info` might be inconsistent with the log. Needs review
     of all usages of `ctx.cluster_info` to ensure correctness.
   - See also: `mod.rs:1956` — review all usages of `ctx.cluster_info`
+  - **Analysis:** `ctx.cluster_info` is mutated in `switch_config()` (add/remove/update/promote)
+    and `fallback_conf_change()` (undo). If a node crashes mid-recovery or receives a snapshot,
+    the reconstructed cluster state may differ from what other nodes see. Fix: include full
+    cluster membership snapshot in each ConfChange log entry so recovery is deterministic.
+  - **Breakdown (est. 300-600 LOC total):**
+    - [ ] Phase 1: Add `cluster_snapshot` field to ConfChange proto/struct (~60-80 LOC)
+    - [ ] Phase 2: Update `switch_config()` to use snapshot for state restoration (~80-120 LOC)
+    - [ ] Phase 3: Update `fallback_conf_change()` to use snapshot (~60-100 LOC)
+    - [ ] Phase 4: Update recovery and snapshot installation paths (~40-80 LOC)
+    - [ ] Phase 5: Add comprehensive tests for conf change consistency (~100-180 LOC)
+    - [ ] Phase 6: Documentation and cleanup (~20-30 LOC)
 
 - [x] **FIXME: Snapshot validation logic correctness**
   - File: `crates/curp/src/server/raw_curp/mod.rs:1128`
@@ -27,9 +38,14 @@
     used an asymmetric comparison that could reject valid snapshots from higher terms. Replaced with
     standard Raft log ordering: accept if snapshot term > follower term, or same term with index >=.
 
-- [ ] **FIXME: Persist other log entries**
+- [x] **FIXME: Persist other log entries**
   - File: `crates/curp/src/server/raw_curp/log.rs:446`
-  - Currently only some log entries are persisted; others should be too.
+  - **Resolved (stale FIXME):** All 6 callers of `log.push()` already call `persistent_log_entries()`
+    after pushing: `push_logs()` (line 569), `handle_propose_shutdown()` (line 653),
+    `handle_propose_conf_change()` (line 697), `handle_publish()` (line 725),
+    `become_candidate()` (line 1057), and `recover_from_spec_pools()` (line 1872).
+    The FIXME was added during initial persistence refactoring but all entry types have since
+    been covered. Removed the stale comment from `log.rs`.
 
 ### Engine / Storage Fixes
 
@@ -43,9 +59,13 @@
 
 ### CURP Server Improvements
 
-- [ ] **TODO: Better dedup mechanism in log entries**
+- [x] **TODO: Better dedup mechanism in log entries**
   - File: `crates/curp/src/server/raw_curp/mod.rs:1843`
-  - Current dedup approach needs improvement.
+  - **Fixed:** Replaced O(n) `get_cmd_ids()` (which rebuilt a `HashSet<ProposeId>` from the entire
+    log on every call) with an incremental `cmd_ids` cache maintained inside the `Log<C>` struct.
+    The cache is updated on `push_back()`, `pop_front()`, `truncate()`, `clear()`, and `restore()`.
+    Dedup lookups in `recover_from_spec_pools()` are now O(1) via `contains_cmd_id()`. Added 3 unit
+    tests covering lifecycle, truncation, and restore scenarios.
 
 - [x] **TODO: Disable dedup for read-only or commutative commands**
   - File: `crates/curp/src/server/curp_node.rs:267`

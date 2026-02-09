@@ -1838,18 +1838,14 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         }
 
         // get all possibly executed(fast path) entries
-        let existing_log_ids = log.get_cmd_ids();
         let recovered_cmds = entry_cnt
             .into_values()
             // only cmds whose cnt >= ( f + 1 ) / 2 + 1 can be recovered
             .filter_map(|(cmd, cnt)| {
                 (cnt >= recover_quorum(self.ctx.cluster_info.voters_len())).then_some(cmd)
             })
-            // dedup in current logs
-            .filter(|entry| {
-                // TODO: better dedup mechanism
-                !existing_log_ids.contains(&entry.id)
-            })
+            // dedup against entries already in the log
+            .filter(|entry| !log.contains_cmd_id(&entry.id))
             .collect_vec();
 
         let mut sp_l = self.ctx.spec_pool.lock();
