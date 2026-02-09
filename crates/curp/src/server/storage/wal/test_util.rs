@@ -1,4 +1,3 @@
-use bytes::BytesMut;
 use curp_external_api::LogIndex;
 use curp_test_utils::test_cmd::TestCommand;
 use parking_lot::Mutex;

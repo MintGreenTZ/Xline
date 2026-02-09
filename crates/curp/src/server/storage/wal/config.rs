@@ -32,18 +32,11 @@ impl WALConfig {
         })
     }
 
-    /// Creates a new memory `WALConfig`
-    pub(crate) fn new_memory() -> Self {
-        Self::Memory
-    }
-
     /// Sets the `max_segment_size`
+    #[cfg(test)]
     pub(crate) fn with_max_segment_size(self, size: u64) -> Self {
         match self {
-            Self::Persistent(PersistentConfig {
-                dir,
-                max_segment_size,
-            }) => Self::Persistent(PersistentConfig {
+            Self::Persistent(PersistentConfig { dir, .. }) => Self::Persistent(PersistentConfig {
                 dir,
                 max_segment_size: size,
             }),

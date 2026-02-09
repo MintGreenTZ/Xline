@@ -1,5 +1,3 @@
-#![allow(unused)] // TODO: remove this until used
-
 /// The WAL codec
 pub(super) mod codec;
 

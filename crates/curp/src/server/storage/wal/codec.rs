@@ -1,15 +1,14 @@
-use std::{io, marker::PhantomData};
+use std::io;
 
 use clippy_utilities::NumericCast;
 use curp_external_api::LogIndex;
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
-use thiserror::Error;
 
 use super::{
     error::{CorruptType, WALError},
     framed::{Decoder, Encoder},
-    util::{get_checksum, validate_data},
+    util::get_checksum,
 };
 use crate::log_entry::LogEntry;
 
@@ -274,6 +273,7 @@ where
 
 impl<C> DataFrameOwned<C> {
     /// Converts `DataFrameOwned` to `DataFrame`
+    #[cfg(test)]
     pub(super) fn get_ref(&self) -> DataFrame<'_, C> {
         match *self {
             DataFrameOwned::Entry(ref entry) => DataFrame::Entry(entry),
@@ -360,14 +360,6 @@ impl FrameEncoder for CommitFrame {
 #[cfg(test)]
 mod tests {
     use curp_test_utils::test_cmd::TestCommand;
-    use futures::SinkExt;
-    use tempfile::tempfile;
-    use tokio::{
-        fs::File as TokioFile,
-        io::{AsyncSeekExt, AsyncWriteExt, DuplexStream},
-    };
-    use tokio_stream::StreamExt;
-    use tokio_util::codec::Framed;
 
     use super::*;
     use crate::{log_entry::EntryData, rpc::ProposeId};
@@ -399,7 +391,6 @@ mod tests {
         let mut codec = WAL::<TestCommand>::new();
         let entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
         let data_frame = DataFrameOwned::Entry(entry.clone());
-        let seal_frame = DataFrameOwned::<TestCommand>::SealIndex(1);
         let mut encoded = codec.encode(vec![data_frame.get_ref()]).unwrap();
         encoded[0] = 0;
 
@@ -412,7 +403,6 @@ mod tests {
         let mut codec = WAL::<TestCommand>::new();
         let entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
         let data_frame = DataFrameOwned::Entry(entry.clone());
-        let seal_frame = DataFrameOwned::<TestCommand>::SealIndex(1);
         let mut encoded = codec.encode(vec![data_frame.get_ref()]).unwrap();
         encoded[1] = 0;
 

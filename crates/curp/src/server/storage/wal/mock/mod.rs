@@ -1,11 +1,10 @@
-use std::{collections::VecDeque, io, marker::PhantomData};
+use std::{collections::VecDeque, io};
 
 use curp_external_api::LogIndex;
-use serde::{de::DeserializeOwned, Serialize};
 
 use crate::log_entry::LogEntry;
 
-use super::{codec::DataFrame, config::WALConfig, WALStorageOps};
+use super::{codec::DataFrame, WALStorageOps};
 
 /// The mock WAL storage
 #[derive(Debug)]

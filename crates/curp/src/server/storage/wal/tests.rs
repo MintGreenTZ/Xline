@@ -1,10 +1,6 @@
-use std::{fs, path::Path, sync::Arc};
+use std::path::Path;
 
-use bytes::BytesMut;
 use curp_test_utils::test_cmd::TestCommand;
-use parking_lot::Mutex;
-use tempfile::TempDir;
-use tokio_util::codec::Encoder;
 
 use crate::{
     log_entry::{EntryData, LogEntry},
@@ -58,7 +54,7 @@ fn test_head_truncate_at(wal_test_path: &Path, num_entries: usize, truncate_at: 
     let mut storage = WALStorage::<TestCommand>::new(config.clone()).unwrap();
     let _logs = storage.recover().unwrap();
 
-    let mut entry_gen = EntryGenerator::new(TEST_SEGMENT_SIZE);
+    let entry_gen = EntryGenerator::new(TEST_SEGMENT_SIZE);
     let num_entries_per_segment = entry_gen.num_entries_per_segment();
 
     for frame in entry_gen
@@ -88,7 +84,7 @@ fn test_tail_truncate_at(wal_test_path: &Path, num_entries: usize, truncate_at: 
     let mut storage = WALStorage::<TestCommand>::new(config.clone()).unwrap();
     let _logs = storage.recover().unwrap();
 
-    let mut entry_gen = EntryGenerator::new(TEST_SEGMENT_SIZE);
+    let entry_gen = EntryGenerator::new(TEST_SEGMENT_SIZE);
     for frame in entry_gen
         .take(num_entries)
         .into_iter()
@@ -97,7 +93,7 @@ fn test_tail_truncate_at(wal_test_path: &Path, num_entries: usize, truncate_at: 
         storage.send_sync(vec![frame.get_ref()]).unwrap();
     }
 
-    storage.truncate_tail(truncate_at);
+    storage.truncate_tail(truncate_at).unwrap();
     let next_entry =
         LogEntry::<TestCommand>::new(truncate_at + 1, 1, ProposeId(1, 3), EntryData::Empty);
     storage
@@ -126,7 +122,7 @@ fn test_follow_up_append_recovery(wal_test_path: &Path, to_append: usize) {
 
     let next_log_index = logs_initial.last().map_or(0, |e| e.index) + 1;
 
-    let mut entry_gen = EntryGenerator::new(TEST_SEGMENT_SIZE);
+    let entry_gen = EntryGenerator::new(TEST_SEGMENT_SIZE);
     entry_gen.skip(next_log_index as usize - 1);
     let frames = entry_gen
         .take(to_append)

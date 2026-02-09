@@ -2,16 +2,14 @@ use std::{io, marker::PhantomData, ops::Mul};
 
 use clippy_utilities::OverflowArithmetic;
 use curp_external_api::LogIndex;
-use futures::{future::join_all, Future, SinkExt, StreamExt};
 use itertools::Itertools;
 use serde::{de::DeserializeOwned, Serialize};
-use tokio_util::codec::Framed;
 use tracing::{debug, error, info, warn};
 
 use crate::log_entry::LogEntry;
 
 use super::{
-    codec::{DataFrame, DataFrameOwned, WAL},
+    codec::{DataFrame, WAL},
     config::PersistentConfig,
     error::{CorruptType, WALError},
     pipeline::FilePipeline,
@@ -42,9 +40,9 @@ impl<C> WALStorage<C> {
     /// Creates a new `LogStorage`
     pub(super) fn new(config: PersistentConfig) -> io::Result<WALStorage<C>> {
         if !config.dir.try_exists()? {
-            std::fs::create_dir_all(&config.dir);
+            std::fs::create_dir_all(&config.dir)?;
         }
-        let mut pipeline = FilePipeline::new(config.dir.clone(), config.max_segment_size);
+        let pipeline = FilePipeline::new(config.dir.clone(), config.max_segment_size);
         Ok(Self {
             config,
             pipeline,
@@ -145,7 +143,7 @@ where
 
         debug!("performing head truncation on index: {compact_index}");
 
-        let mut to_remove_num = self
+        let to_remove_num = self
             .segments
             .iter()
             .take_while(|s| s.base_index() <= compact_index)

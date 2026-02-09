@@ -1,17 +1,13 @@
 use std::{
     io,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    task::Poll,
     thread::JoinHandle,
 };
 
-use clippy_utilities::OverflowArithmetic;
-use event_listener::Event;
-use thiserror::Error;
 use tracing::error;
 
 use super::util::LockedFile;
@@ -175,7 +171,6 @@ impl std::fmt::Debug for FilePipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::storage::wal::util::get_file_paths_with_ext;
 
     #[tokio::test]
     async fn file_pipeline_is_ok() {
@@ -183,7 +178,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut pipeline = FilePipeline::new(dir.as_ref().into(), file_size);
 
-        let check_size = |mut file: LockedFile| {
+        let check_size = |file: LockedFile| {
             let file = file.into_std();
             assert_eq!(file.metadata().unwrap().len(), file_size,);
         };

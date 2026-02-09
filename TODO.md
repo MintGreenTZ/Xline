@@ -128,9 +128,13 @@
 
 ### WAL
 
-- [ ] **TODO: Remove `#![allow(unused)]` from WAL module**
+- [x] **TODO: Remove `#![allow(unused)]` from WAL module**
   - File: `crates/curp/src/server/storage/wal/mod.rs:1`
-  - The WAL module has a blanket allow(unused) that should be cleaned up.
+  - **Fixed:** Removed blanket `#![allow(unused)]` and cleaned up all 40+ warnings across 8 WAL files:
+    removed unused imports, dead code (`new_memory()`, `SegmentRemover::rwal_path` field, `WALSegment::size()`),
+    gated test-only items with `#[cfg(test)]` (`get_ref()`, `with_max_segment_size()`), fixed unused mut
+    variables, handled `#[must_use]` results properly, and converted a doc comment on `thread_local!` to
+    a regular comment.
 
 - [ ] **TODO: Fix 8-bit alignment in WAL codec**
   - File: `crates/curp/src/server/storage/wal/codec.rs:105`

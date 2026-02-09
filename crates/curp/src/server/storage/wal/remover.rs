@@ -1,26 +1,18 @@
 use std::{
-    cell::RefCell,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::atomic::AtomicBool,
-};
-
-use itertools::Itertools;
-use tokio::{
-    fs::File,
-    io::{AsyncReadExt, AsyncWriteExt},
 };
 
 use super::{
     segment::WALSegment,
-    util::{get_checksum, get_file_paths_with_ext, is_exist, parse_u64, validate_data, LockedFile},
+    util::{get_checksum, is_exist, parse_u64, validate_data, LockedFile},
 };
 
-/// Utilize thread-local variables because the tests are running concurrently,
-/// and different tests might set this value, leading to a race condition.
+// Utilize thread-local variables because the tests are running concurrently,
+// and different tests might set this value, leading to a race condition.
 #[cfg(test)]
 thread_local! {
-    static ABORT_REMOVE: RefCell<bool> = RefCell::new(false);
+    static ABORT_REMOVE: std::cell::RefCell<bool> = std::cell::RefCell::new(false);
 }
 
 /// The name of the RWAL file
@@ -31,10 +23,7 @@ const REMOVER_WAL_FILE_NAME: &str = "segments.rwal";
 /// The remover will firstly creates a write ahead log that stores
 /// the removal information, then it will remove it after the segment
 /// removal has completed.
-pub(super) struct SegmentRemover {
-    /// The WAL path for storing the remove information
-    rwal_path: PathBuf,
-}
+pub(super) struct SegmentRemover;
 
 impl SegmentRemover {
     #[allow(
@@ -71,7 +60,7 @@ impl SegmentRemover {
         let mut wal = LockedFile::open_rw(wal_path.clone())?.into_std();
         let mut buf = vec![];
         let n = wal.read_to_end(&mut buf)?;
-        /// At least checksum + one record
+        // At least checksum + one record
         if n < CHECKSUM_SIZE + RECORD_SIZE {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
         }
@@ -174,8 +163,6 @@ impl SegmentRemover {
 
 #[cfg(test)]
 mod tests {
-    use futures::future::join_all;
-
     use super::*;
 
     #[test]
@@ -195,7 +182,7 @@ mod tests {
             file_paths.push(wal_path);
         }
 
-        SegmentRemover::new_removal(&dir_path, segments.iter());
+        SegmentRemover::new_removal(&dir_path, segments.iter()).unwrap();
 
         assert!(
             file_paths.into_iter().all(|p| !is_exist(p)),
@@ -220,7 +207,7 @@ mod tests {
             wal_path.push(WALSegment::segment_name(i, i + 1));
             file_paths.push(wal_path);
         }
-        SegmentRemover::new_removal(&dir_path, segments.iter());
+        SegmentRemover::new_removal(&dir_path, segments.iter()).unwrap();
         ABORT_REMOVE.with(|f| *f.borrow_mut() = false);
         assert!(file_paths.iter().find(|p| is_exist(p)).is_some());
         SegmentRemover::recover(&dir_path).unwrap();

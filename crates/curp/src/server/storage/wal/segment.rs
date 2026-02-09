@@ -1,21 +1,11 @@
 use std::{
     fs::File,
     io::{self, Read, Write},
-    iter,
-    pin::Pin,
-    sync::Arc,
-    task::Poll,
 };
 
 use clippy_utilities::{NumericCast, OverflowArithmetic};
 use curp_external_api::LogIndex;
-use futures::{ready, FutureExt, SinkExt};
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
-    sync::Mutex,
-};
-use tokio_stream::StreamExt;
 
 use super::{
     codec::{DataFrame, DataFrameOwned, WAL},
@@ -61,7 +51,7 @@ impl WALSegment {
         size_limit: u64,
     ) -> io::Result<Self> {
         let segment_name = Self::segment_name(segment_id, base_index);
-        let mut locked_file = tmp_file.rename(segment_name)?;
+        let locked_file = tmp_file.rename(segment_name)?;
         let mut file = locked_file.into_std();
         file.write_all(&Self::gen_header(base_index, segment_id))?;
         file.flush()?;
@@ -79,7 +69,7 @@ impl WALSegment {
     }
 
     /// Open an existing WAL segment file
-    pub(super) fn open(mut locked_file: LockedFile, size_limit: u64) -> Result<Self, WALError> {
+    pub(super) fn open(locked_file: LockedFile, size_limit: u64) -> Result<Self, WALError> {
         let mut file = locked_file.into_std();
         let size = file.metadata()?.len();
         let mut buf = vec![0; WAL_HEADER_SIZE];
@@ -201,11 +191,6 @@ impl WALSegment {
         self.seal_index = index;
     }
 
-    /// Get the size of the segment
-    pub(super) fn size(&self) -> u64 {
-        self.size
-    }
-
     /// Checks if the segment is full
     pub(super) fn is_full(&self) -> bool {
         self.size >= self.size_limit
@@ -315,7 +300,7 @@ impl Ord for WALSegment {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, time::Duration};
+    use std::sync::Arc;
 
     use curp_test_utils::test_cmd::TestCommand;
 
@@ -391,10 +376,12 @@ mod tests {
             })
             .collect();
 
-        segment.write_sync(
-            frames.iter().map(DataFrameOwned::get_ref).collect(),
-            WAL::new(),
-        );
+        segment
+            .write_sync(
+                frames.iter().map(DataFrameOwned::get_ref).collect(),
+                WAL::new(),
+            )
+            .unwrap();
 
         drop(segment);
 
