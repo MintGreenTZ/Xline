@@ -93,6 +93,18 @@ const CHANGE_CHANNEL_SIZE: usize = 128;
 /// Max gap between leader and learner when promoting a learner
 const MAX_PROMOTE_GAP: u64 = 500;
 
+/// Old member info captured by `switch_config()` for fallback/undo purposes.
+pub(super) struct FallbackInfo {
+    /// Old peer addresses (for Remove undo or Update undo)
+    pub(super) addrs: Vec<String>,
+    /// Old member name (for Remove undo)
+    pub(super) name: String,
+    /// Old client URLs (for Remove undo)
+    pub(super) client_urls: Vec<String>,
+    /// Whether the member was a learner
+    pub(super) is_learner: bool,
+}
+
 /// The curp state machine
 pub struct RawCurp<C: Command, RC: RoleChange> {
     /// Curp state
@@ -690,18 +702,40 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         self.check_new_config(&conf_changes)?;
 
         self.deduplicate(propose_id, None)?;
-        let prepared = Log::<C>::prepare_entry(st_r.term, propose_id, conf_changes.clone());
+        // Enrich conf changes with current member state for consistent recovery
+        let enriched_changes: Vec<ConfChange> = conf_changes
+            .into_iter()
+            .map(|cc| {
+                if let Some(m) = self.ctx.cluster_info.get(&cc.node_id) {
+                    cc.with_member_state(
+                        m.name.clone(),
+                        m.client_urls.clone(),
+                        m.is_learner,
+                    )
+                } else {
+                    cc
+                }
+            })
+            .collect();
+        let prepared =
+            Log::<C>::prepare_entry(st_r.term, propose_id, enriched_changes.clone());
         let mut log_w = self.log.write();
         let entry = log_w.push_prepared(prepared);
         debug!("{} gets new log[{}]", self.id(), entry.index);
-        let apply_opt = self.apply_conf_change(conf_changes);
+        let apply_opt = self.apply_conf_change(enriched_changes);
         self.ctx
             .last_conf_change_idx
             .store(entry.index, Ordering::Release);
-        if let Some((addrs, name, is_learner)) = apply_opt {
+        if let Some(info) = apply_opt {
             let _ig = log_w.fallback_contexts.insert(
                 entry.index,
-                FallbackContext::new(Arc::clone(&entry), addrs, name, is_learner),
+                FallbackContext::new(
+                    Arc::clone(&entry),
+                    info.addrs,
+                    info.name,
+                    info.client_urls,
+                    info.is_learner,
+                ),
             );
         }
         self.entry_process_single(&mut log_w, &entry, false, st_r.term);
@@ -817,19 +851,33 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 unreachable!("the entry in the fallback_info should be conf change entry");
             };
             let changes = conf_change.clone();
-            self.fallback_conf_change(changes, info.addrs, info.name, info.is_learner);
+            self.fallback_conf_change(
+                changes,
+                FallbackInfo {
+                    addrs: info.addrs,
+                    name: info.name,
+                    client_urls: info.client_urls,
+                    is_learner: info.is_learner,
+                },
+            );
         }
         // apply conf change entries
         for e in cc_entries {
             let EntryData::ConfChange(ref cc) = e.entry_data else {
                 unreachable!("cc_entry should be conf change entry");
             };
-            let Some((addrs, name, is_learner)) = self.apply_conf_change(cc.clone()) else {
+            let Some(fb_info) = self.apply_conf_change(cc.clone()) else {
                 continue;
             };
             let _ig = log_w.fallback_contexts.insert(
                 e.index,
-                FallbackContext::new(Arc::clone(&e), addrs, name, is_learner),
+                FallbackContext::new(
+                    Arc::clone(&e),
+                    fb_info.addrs,
+                    fb_info.name,
+                    fb_info.client_urls,
+                    fb_info.is_learner,
+                ),
             );
         }
         // update commit index
@@ -1490,11 +1538,11 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         Ok(())
     }
 
-    /// Apply conf changes and return true if self node is removed
+    /// Apply conf changes and return old member info for fallback
     pub(super) fn apply_conf_change(
         &self,
         changes: Vec<ConfChange>,
-    ) -> Option<(Vec<String>, String, bool)> {
+    ) -> Option<FallbackInfo> {
         assert_eq!(changes.len(), 1, "Joint consensus is not supported yet");
         let Some(conf_change) = changes.into_iter().next() else {
             unreachable!("conf change is empty");
@@ -1507,12 +1555,10 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
     pub(super) fn fallback_conf_change(
         &self,
         changes: Vec<ConfChange>,
-        old_addrs: Vec<String>,
-        name: String,
-        is_learner: bool,
+        info: FallbackInfo,
     ) {
         assert_eq!(changes.len(), 1, "Joint consensus is not supported yet");
-        if is_learner {
+        if info.is_learner {
             metrics::get().learner_promote_failed.add(
                 1,
                 &[KeyValue::new(
@@ -1538,26 +1584,35 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 Some(ConfChange::remove(node_id))
             }
             ConfChangeType::Remove => {
-                let member = Member::new(node_id, name, old_addrs.clone(), [], is_learner);
+                let member = Member::new(
+                    node_id,
+                    info.name,
+                    info.addrs.clone(),
+                    info.client_urls,
+                    info.is_learner,
+                );
                 self.cst
-                    .map_lock(|mut cst_l| _ = cst_l.config.insert(node_id, is_learner));
-                self.lst.insert(node_id, is_learner);
+                    .map_lock(|mut cst_l| _ = cst_l.config.insert(node_id, info.is_learner));
+                self.lst.insert(node_id, info.is_learner);
                 _ = self.ctx.sync_events.insert(node_id, Arc::new(Event::new()));
                 let _ig1 = self.ctx.curp_storage.put_member(&member);
                 let _ig2 = self.ctx.cluster_info.insert(member);
-                if is_learner {
-                    Some(ConfChange::add_learner(node_id, old_addrs))
+                if info.is_learner {
+                    Some(ConfChange::add_learner(node_id, info.addrs))
                 } else {
-                    Some(ConfChange::add(node_id, old_addrs))
+                    Some(ConfChange::add(node_id, info.addrs))
                 }
             }
             ConfChangeType::Update => {
-                _ = self.ctx.cluster_info.update(&node_id, old_addrs.clone());
+                _ = self
+                    .ctx
+                    .cluster_info
+                    .update(&node_id, info.addrs.clone());
                 let m = self.ctx.cluster_info.get(&node_id).unwrap_or_else(|| {
                     unreachable!("node {} should exist in cluster info", node_id)
                 });
                 let _ig = self.ctx.curp_storage.put_member(&*m);
-                Some(ConfChange::update(node_id, old_addrs))
+                Some(ConfChange::update(node_id, info.addrs))
             }
             ConfChangeType::Promote => {
                 self.cst.map_lock(|mut cst_l| {
@@ -1947,23 +2002,37 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 
     /// Switch to a new config and return old member infos for fallback
     ///
-    /// FIXME: The state of `ctx.cluster_info` might be inconsistent with the log. A potential
-    /// fix would be to include the entire cluster info in the conf change log entry and
-    /// overwrite `ctx.cluster_info` when switching
-    fn switch_config(&self, conf_change: ConfChange) -> Option<(Vec<String>, String, bool)> {
+    /// The ConfChange entry carries the member's name, client_urls, and is_learner
+    /// state so that recovery can reconstruct cluster_info deterministically from
+    /// the log without relying on separate SetNodeState entries.
+    fn switch_config(&self, conf_change: ConfChange) -> Option<FallbackInfo> {
         let node_id = conf_change.node_id;
         let mut cst_l = self.cst.lock();
         #[allow(clippy::explicit_auto_deref)] // Avoid compiler complaint about `Dashmap::Ref` type
         let (modified, fallback_info) = match conf_change.change_type() {
             ConfChangeType::Add | ConfChangeType::AddLearner => {
                 let is_learner = matches!(conf_change.change_type(), ConfChangeType::AddLearner);
-                let member = Member::new(node_id, "", conf_change.address.clone(), [], is_learner);
+                let member = Member::new(
+                    node_id,
+                    conf_change.name.clone(),
+                    conf_change.address.clone(),
+                    conf_change.client_urls.clone(),
+                    is_learner,
+                );
                 _ = cst_l.config.insert(node_id, is_learner);
                 self.lst.insert(node_id, is_learner);
                 _ = self.ctx.sync_events.insert(node_id, Arc::new(Event::new()));
                 let _ig = self.ctx.curp_storage.put_member(&member);
                 let m = self.ctx.cluster_info.insert(member);
-                (m.is_none(), Some((vec![], String::new(), is_learner)))
+                (
+                    m.is_none(),
+                    Some(FallbackInfo {
+                        addrs: vec![],
+                        name: String::new(),
+                        client_urls: vec![],
+                        is_learner,
+                    }),
+                )
             }
             ConfChangeType::Remove => {
                 _ = cst_l.config.remove(node_id);
@@ -1973,13 +2042,15 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 let _ig = self.ctx.curp_storage.remove_member(node_id);
                 // The member may not exist because the node could be restarted
                 // and has fetched the newest cluster info
-                //
-                // TODO: Review all the usages of `ctx.cluster_info` to ensure all
-                // the assertions are correct.
                 let member_opt = self.ctx.cluster_info.remove(&node_id);
                 (
                     true,
-                    member_opt.map(|m| (m.peer_urls, m.name, m.is_learner)),
+                    member_opt.map(|m| FallbackInfo {
+                        addrs: m.peer_urls,
+                        name: m.name,
+                        client_urls: m.client_urls,
+                        is_learner: m.is_learner,
+                    }),
                 )
             }
             ConfChangeType::Update => {
@@ -1993,7 +2064,12 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 let _ig = self.ctx.curp_storage.put_member(&*m);
                 (
                     old_addrs != conf_change.address,
-                    Some((old_addrs, String::new(), false)),
+                    Some(FallbackInfo {
+                        addrs: old_addrs,
+                        name: String::new(),
+                        client_urls: vec![],
+                        is_learner: false,
+                    }),
                 )
             }
             ConfChangeType::Promote => {
@@ -2005,7 +2081,15 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                     unreachable!("the member should exist after promote");
                 });
                 let _ig = self.ctx.curp_storage.put_member(&*m);
-                (modified, Some((vec![], String::new(), false)))
+                (
+                    modified,
+                    Some(FallbackInfo {
+                        addrs: vec![],
+                        name: String::new(),
+                        client_urls: vec![],
+                        is_learner: false,
+                    }),
+                )
             }
         };
         if modified {

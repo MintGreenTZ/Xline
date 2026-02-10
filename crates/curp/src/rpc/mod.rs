@@ -470,6 +470,9 @@ impl ConfChange {
             change_type: ConfChangeType::Add as i32,
             node_id,
             address,
+            name: String::new(),
+            client_urls: vec![],
+            is_learner: false,
         }
     }
 
@@ -481,6 +484,9 @@ impl ConfChange {
             change_type: ConfChangeType::Remove as i32,
             node_id,
             address: vec![],
+            name: String::new(),
+            client_urls: vec![],
+            is_learner: false,
         }
     }
 
@@ -492,6 +498,9 @@ impl ConfChange {
             change_type: ConfChangeType::Update as i32,
             node_id,
             address,
+            name: String::new(),
+            client_urls: vec![],
+            is_learner: false,
         }
     }
 
@@ -503,6 +512,9 @@ impl ConfChange {
             change_type: ConfChangeType::AddLearner as i32,
             node_id,
             address,
+            name: String::new(),
+            client_urls: vec![],
+            is_learner: true,
         }
     }
 
@@ -514,6 +526,9 @@ impl ConfChange {
             change_type: ConfChangeType::Promote as i32,
             node_id,
             address: vec![],
+            name: String::new(),
+            client_urls: vec![],
+            is_learner: false,
         }
     }
 
@@ -525,7 +540,25 @@ impl ConfChange {
             change_type: ConfChangeType::Promote as i32,
             node_id,
             address: vec![],
+            name: String::new(),
+            client_urls: vec![],
+            is_learner: false,
         }
+    }
+
+    /// Enrich this `ConfChange` with the current member state from cluster info.
+    /// This captures the member's name, client_urls, and is_learner flag so that
+    /// the information is persisted in the log entry for consistent recovery.
+    pub(crate) fn with_member_state(
+        mut self,
+        name: String,
+        client_urls: Vec<String>,
+        is_learner: bool,
+    ) -> Self {
+        self.name = name;
+        self.client_urls = client_urls;
+        self.is_learner = is_learner;
+        self
     }
 }
 

@@ -142,6 +142,8 @@ pub(super) struct FallbackContext<C: Command> {
     pub(super) addrs: Vec<String>,
     /// The name of the old config
     pub(super) name: String,
+    /// The client URLs of the old config
+    pub(super) client_urls: Vec<String>,
     /// Whether the old config is a learner
     pub(super) is_learner: bool,
 }
@@ -152,12 +154,14 @@ impl<C: Command> FallbackContext<C> {
         origin_entry: Arc<LogEntry<C>>,
         addrs: Vec<String>,
         name: String,
+        client_urls: Vec<String>,
         is_learner: bool,
     ) -> Self {
         Self {
             origin_entry,
             addrs,
             name,
+            client_urls,
             is_learner,
         }
     }

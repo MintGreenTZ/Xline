@@ -70,6 +70,9 @@ impl Cluster for ClusterServer {
                 change_type,
                 node_id,
                 address: peer_url_ls,
+                name: String::new(),
+                client_urls: vec![],
+                is_learner: false,
             }])
             .await?;
         let resp = MemberAddResponse {
@@ -90,6 +93,9 @@ impl Cluster for ClusterServer {
                 change_type: i32::from(Remove),
                 node_id: req.id,
                 address: vec![],
+                name: String::new(),
+                client_urls: vec![],
+                is_learner: false,
             }])
             .await?;
         let resp = MemberRemoveResponse {
@@ -109,6 +115,9 @@ impl Cluster for ClusterServer {
                 change_type: i32::from(Update),
                 node_id: req.id,
                 address: req.peer_ur_ls,
+                name: String::new(),
+                client_urls: vec![],
+                is_learner: false,
             }])
             .await?;
         let resp = MemberUpdateResponse {
@@ -151,6 +160,9 @@ impl Cluster for ClusterServer {
                 change_type: i32::from(Promote),
                 node_id: req.id,
                 address: vec![],
+                name: String::new(),
+                client_urls: vec![],
+                is_learner: false,
             }])
             .await?;
         let resp = MemberPromoteResponse {

@@ -698,9 +698,9 @@ fn add_node_should_add_new_node_to_curp() {
     let old_cluster = curp.cluster().clone();
     let changes = vec![ConfChange::add(1, vec!["http://127.0.0.1:4567".to_owned()])];
     assert!(curp.check_new_config(&changes).is_ok());
-    let infos = curp.apply_conf_change(changes.clone()).unwrap();
+    let info = curp.apply_conf_change(changes.clone()).unwrap();
     assert!(curp.contains(1));
-    curp.fallback_conf_change(changes, infos.0, infos.1, infos.2);
+    curp.fallback_conf_change(changes, info);
     let cluster_after_fallback = curp.cluster();
     assert_eq!(
         old_cluster.cluster_id(),
@@ -732,9 +732,9 @@ fn add_learner_node_and_promote_should_success() {
 
     let changes = vec![ConfChange::promote(1)];
     assert!(curp.check_new_config(&changes).is_ok());
-    let infos = curp.apply_conf_change(changes.clone()).unwrap();
+    let info = curp.apply_conf_change(changes.clone()).unwrap();
     assert!(curp.check_learner(1, false));
-    curp.fallback_conf_change(changes, infos.0, infos.1, infos.2);
+    curp.fallback_conf_change(changes, info);
     assert!(curp.check_learner(1, true));
 }
 
@@ -762,10 +762,12 @@ fn remove_node_should_remove_node_from_curp() {
     let follower_id = curp.cluster().get_id_by_name("S1").unwrap();
     let changes = vec![ConfChange::remove(follower_id)];
     assert!(curp.check_new_config(&changes).is_ok());
-    let infos = curp.apply_conf_change(changes.clone()).unwrap();
-    assert_eq!(infos, (vec!["S1".to_owned()], "S1".to_owned(), false));
+    let info = curp.apply_conf_change(changes.clone()).unwrap();
+    assert_eq!(info.addrs, vec!["S1".to_owned()]);
+    assert_eq!(info.name, "S1");
+    assert!(!info.is_learner);
     assert!(!curp.contains(follower_id));
-    curp.fallback_conf_change(changes, infos.0, infos.1, infos.2);
+    curp.fallback_conf_change(changes, info);
     let cluster_after_fallback = curp.cluster();
     assert_eq!(
         old_cluster.cluster_id(),
@@ -810,13 +812,13 @@ fn update_node_should_update_the_address_of_node() {
         vec!["http://127.0.0.1:4567".to_owned()],
     )];
     assert!(curp.check_new_config(&changes).is_ok());
-    let infos = curp.apply_conf_change(changes.clone()).unwrap();
-    assert_eq!(infos, (vec!["S1".to_owned()], String::new(), false));
+    let info = curp.apply_conf_change(changes.clone()).unwrap();
+    assert_eq!(info.addrs, vec!["S1".to_owned()]);
     assert_eq!(
         curp.cluster().peer_urls(follower_id),
         Some(vec!["http://127.0.0.1:4567".to_owned()])
     );
-    curp.fallback_conf_change(changes, infos.0, infos.1, infos.2);
+    curp.fallback_conf_change(changes, info);
     let cluster_after_fallback = curp.cluster();
     assert_eq!(
         old_cluster.cluster_id(),
@@ -871,6 +873,92 @@ fn follower_handle_propose_conf_change() {
             term: 2,
         }))
     ));
+}
+
+#[traced_test]
+#[test]
+fn switch_config_add_uses_enriched_member_state() {
+    let task_manager = Arc::new(TaskManager::new());
+    let curp = { Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager)) };
+
+    // Create a ConfChange with name and client_urls populated (as the leader would do)
+    let cc = ConfChange::add(1, vec!["http://10.0.0.5:2380".to_owned()]).with_member_state(
+        "node-5".to_owned(),
+        vec!["http://10.0.0.5:2379".to_owned()],
+        false,
+    );
+    curp.switch_config(cc);
+
+    // Verify the member was added with the enriched state
+    let member = curp.cluster().get(&1).expect("member 1 should exist");
+    assert_eq!(member.name, "node-5");
+    assert_eq!(
+        member.peer_urls,
+        vec!["http://10.0.0.5:2380".to_owned()]
+    );
+    assert_eq!(
+        member.client_urls,
+        vec!["http://10.0.0.5:2379".to_owned()]
+    );
+    assert!(!member.is_learner);
+}
+
+#[traced_test]
+#[test]
+fn switch_config_add_learner_uses_enriched_member_state() {
+    let task_manager = Arc::new(TaskManager::new());
+    let curp = { Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager)) };
+
+    let cc =
+        ConfChange::add_learner(1, vec!["http://10.0.0.5:2380".to_owned()]).with_member_state(
+            "learner-5".to_owned(),
+            vec!["http://10.0.0.5:2379".to_owned()],
+            true,
+        );
+    curp.switch_config(cc);
+
+    let member = curp.cluster().get(&1).expect("member 1 should exist");
+    assert_eq!(member.name, "learner-5");
+    assert!(member.is_learner);
+    assert_eq!(
+        member.client_urls,
+        vec!["http://10.0.0.5:2379".to_owned()]
+    );
+}
+
+#[traced_test]
+#[test]
+fn remove_fallback_restores_client_urls() {
+    let task_manager = Arc::new(TaskManager::new());
+    let curp = { Arc::new(RawCurp::new_test(5, mock_role_change(), task_manager)) };
+
+    // First add a node with full member state
+    let cc = ConfChange::add(1, vec!["http://10.0.0.5:2380".to_owned()]).with_member_state(
+        "node-5".to_owned(),
+        vec!["http://10.0.0.5:2379".to_owned()],
+        false,
+    );
+    curp.switch_config(cc);
+    assert!(curp.contains(1));
+
+    // Remove the node
+    let changes = vec![ConfChange::remove(1)];
+    let info = curp.apply_conf_change(changes.clone()).unwrap();
+    assert!(!curp.contains(1));
+
+    // Verify fallback info captured client_urls
+    assert_eq!(info.name, "node-5");
+    assert_eq!(info.client_urls, vec!["http://10.0.0.5:2379".to_owned()]);
+
+    // Fallback (undo the remove) should restore the member with client_urls
+    curp.fallback_conf_change(changes, info);
+    assert!(curp.contains(1));
+    let member = curp.cluster().get(&1).expect("member 1 should exist after fallback");
+    assert_eq!(member.name, "node-5");
+    assert_eq!(
+        member.client_urls,
+        vec!["http://10.0.0.5:2379".to_owned()]
+    );
 }
 
 #[traced_test]

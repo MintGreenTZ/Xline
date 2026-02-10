@@ -21,15 +21,24 @@
   - See also: `mod.rs:1956` — review all usages of `ctx.cluster_info`
   - **Analysis:** `ctx.cluster_info` is mutated in `switch_config()` (add/remove/update/promote)
     and `fallback_conf_change()` (undo). If a node crashes mid-recovery or receives a snapshot,
-    the reconstructed cluster state may differ from what other nodes see. Fix: include full
-    cluster membership snapshot in each ConfChange log entry so recovery is deterministic.
-  - **Breakdown (est. 300-600 LOC total):**
-    - [ ] Phase 1: Add `cluster_snapshot` field to ConfChange proto/struct (~60-80 LOC)
-    - [ ] Phase 2: Update `switch_config()` to use snapshot for state restoration (~80-120 LOC)
-    - [ ] Phase 3: Update `fallback_conf_change()` to use snapshot (~60-100 LOC)
-    - [ ] Phase 4: Update recovery and snapshot installation paths (~40-80 LOC)
-    - [ ] Phase 5: Add comprehensive tests for conf change consistency (~100-180 LOC)
-    - [ ] Phase 6: Documentation and cleanup (~20-30 LOC)
+    the reconstructed cluster state may differ from what other nodes see.
+  - **Approach:** Enrich each ConfChange log entry with member state fields (`name`,
+    `client_urls`, `is_learner`) so `switch_config()` can reconstruct Members deterministically
+    from the log alone, without relying on transient in-memory state.
+  - **Breakdown:**
+    - [x] Phase 1: Enrich ConfChange with member state fields (~200 LOC)
+      - Added `name`, `client_urls`, `is_learner` fields to ConfChange proto message
+      - Updated all ConfChange constructors in `rpc/mod.rs` with `with_member_state()` method
+      - Updated `switch_config()` to use enriched fields when creating Members (instead of
+        empty defaults), and returns new `FallbackInfo` struct with `client_urls`
+      - Updated `handle_propose_conf_change()` to enrich ConfChange entries with current
+        member state from `cluster_info` before logging
+      - Updated `fallback_conf_change()` to restore `client_urls` when undoing Remove ops
+      - Added `client_urls` field to `FallbackContext` in `log.rs`
+      - Added 3 new tests + updated 4 existing tests
+    - [ ] Phase 2: Audit all `ctx.cluster_info` usages for consistency (~80-120 LOC)
+    - [ ] Phase 3: Update recovery and snapshot installation paths (~40-80 LOC)
+    - [ ] Phase 4: Additional integration tests for conf change consistency (~60-100 LOC)
 
 - [x] **FIXME: Snapshot validation logic correctness**
   - File: `crates/curp/src/server/raw_curp/mod.rs:1128`
