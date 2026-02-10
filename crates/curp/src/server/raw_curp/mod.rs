@@ -237,6 +237,23 @@ impl<C: Command, RC: RoleChange> RawCurpBuilder<C, RC> {
             log_w
                 .restore_entries(args.entries)
                 .map_err(|e| RawCurpBuilderError::ValidationError(e.to_string()))?;
+
+            // Populate fallback_contexts for uncommitted conf change entries.
+            // After a crash, these entries are restored from the WAL but their
+            // fallback contexts are lost (not persisted). Without this, a new
+            // leader's AppendEntries that overwrites these entries would panic
+            // at the unreachable!() in handle_append_entries.
+            for i in (log_w.commit_index + 1)..=log_w.last_log_index() {
+                let entry = log_w.get(i).map(Arc::clone);
+                if let Some(entry) = entry {
+                    if let EntryData::ConfChange(ref cc) = entry.entry_data {
+                        let fb_ctx = raw_curp.build_fallback_context_from_conf_change(
+                            &entry, cc,
+                        );
+                        let _ig = log_w.fallback_contexts.insert(i, fb_ctx);
+                    }
+                }
+            }
         }
 
         Ok(raw_curp)
@@ -2015,6 +2032,59 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         self.ctx.lm.write().clear();
         self.ctx.uncommitted_pool.lock().clear();
         self.lst.reset_no_op_state();
+    }
+
+    /// Build a `FallbackContext` for a conf change entry during recovery.
+    ///
+    /// After a crash, uncommitted conf change entries are restored from the WAL
+    /// but their `FallbackContext` is lost. This method reconstructs the context
+    /// from the entry itself and the current cluster_info state (which already
+    /// reflects the change because `switch_config()` persists members immediately).
+    ///
+    /// The reconstructed context allows `handle_append_entries()` to properly
+    /// roll back the conf change if a new leader overwrites the entry.
+    fn build_fallback_context_from_conf_change(
+        &self,
+        entry: &Arc<LogEntry<C>>,
+        conf_change: &[ConfChange],
+    ) -> FallbackContext<C> {
+        assert_eq!(conf_change.len(), 1, "Joint consensus is not supported yet");
+        let cc = &conf_change[0];
+        let node_id = cc.node_id;
+        // For Add/AddLearner: the fallback will remove the member, so we store
+        // empty old-state. For Remove: the fallback will re-add the member using
+        // the state from the ConfChange entry (which Phase 1 enriched with member
+        // state). For Update: we store the current peer_urls from cluster_info
+        // (which is the post-update value; the original pre-update value is lost
+        // after crash). For Promote: the fallback will demote, so empty old-state.
+        let (addrs, name, client_urls, is_learner) = match cc.change_type() {
+            ConfChangeType::Add | ConfChangeType::AddLearner => {
+                let is_learner = matches!(cc.change_type(), ConfChangeType::AddLearner);
+                (vec![], String::new(), vec![], is_learner)
+            }
+            ConfChangeType::Remove => {
+                // The ConfChange carries the member's state (Phase 1 enrichment)
+                (
+                    cc.address.clone(),
+                    cc.name.clone(),
+                    cc.client_urls.clone(),
+                    cc.is_learner,
+                )
+            }
+            ConfChangeType::Update => {
+                // After crash, cluster_info already has the new addrs; the old
+                // addrs are lost. We store the current addrs as a best-effort
+                // fallback — the new leader will set the correct state anyway.
+                let addrs = self
+                    .ctx
+                    .cluster_info
+                    .peer_urls(node_id)
+                    .unwrap_or_default();
+                (addrs, String::new(), vec![], false)
+            }
+            ConfChangeType::Promote => (vec![], String::new(), vec![], false),
+        };
+        FallbackContext::new(Arc::clone(entry), addrs, name, client_urls, is_learner)
     }
 
     /// Switch to a new config and return old member infos for fallback

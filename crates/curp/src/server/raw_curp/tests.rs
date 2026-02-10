@@ -1240,3 +1240,214 @@ fn verify_install_snapshot_with_entries_ahead_of_snapshot() {
     // snapshot at (index=1, term=3) — behind follower's last index
     assert!(!curp.verify_install_snapshot(3, s1_id, 1, 3));
 }
+
+/// Helper to build a RawCurp simulating recovery with pre-existing log entries.
+/// `n` is the number of members in the cluster (including self "S0"),
+/// `last_applied` is the commit index at crash time,
+/// `entries` are the log entries recovered from the WAL.
+fn build_recovered_curp(
+    n: u64,
+    last_applied: LogIndex,
+    entries: Vec<LogEntry<TestCommand>>,
+) -> RawCurp<TestCommand, TestRoleChange> {
+    let all_members: HashMap<_, _> = (0..n)
+        .map(|i| (format!("S{i}"), vec![format!("S{i}")]))
+        .collect();
+    let cluster_info = Arc::new(ClusterInfo::from_members_map(all_members, [], "S0"));
+    let cmd_board = Arc::new(RwLock::new(CommandBoard::new()));
+    let lease_manager = Arc::new(RwLock::new(LeaseManager::new()));
+    let sync_events = cluster_info
+        .peers_ids()
+        .into_iter()
+        .map(|id| (id, Arc::new(Event::new())))
+        .collect();
+    let connects = cluster_info
+        .peers_ids()
+        .into_iter()
+        .map(|id| {
+            (
+                id,
+                InnerConnectApiWrapper::new_from_arc(Arc::new(MockInnerConnectApi::new())),
+            )
+        })
+        .collect();
+    let curp_config = CurpConfigBuilder::default()
+        .log_entries_cap(100)
+        .build()
+        .unwrap();
+    let curp_storage = Arc::new(DB::open(&curp_config.engine_cfg).unwrap());
+    let _ignore = curp_storage.recover().unwrap();
+    let sp = Arc::new(Mutex::new(SpeculativePool::new(vec![Box::new(
+        TestSpecPool::default(),
+    )])));
+    let ucp = Arc::new(Mutex::new(UncommittedPool::new(vec![Box::new(
+        TestUncomPool::default(),
+    )])));
+    let (as_tx, as_rx) = flume::unbounded();
+    std::mem::forget(as_rx);
+    let resp_txs = Arc::new(Mutex::default());
+    let id_barrier = Arc::new(IdBarrier::new());
+    let task_manager = Arc::new(TaskManager::new());
+
+    RawCurp::builder()
+        .cluster_info(cluster_info)
+        .is_leader(false) // recovery starts as follower
+        .cmd_board(cmd_board)
+        .lease_manager(lease_manager)
+        .cfg(Arc::new(curp_config))
+        .sync_events(sync_events)
+        .role_change(mock_role_change())
+        .task_manager(task_manager)
+        .connects(connects)
+        .curp_storage(curp_storage)
+        .last_applied(last_applied)
+        .entries(entries)
+        .spec_pool(sp)
+        .uncommitted_pool(ucp)
+        .as_tx(as_tx)
+        .resp_txs(resp_txs)
+        .id_barrier(id_barrier)
+        .build_raw_curp()
+        .unwrap()
+}
+
+#[traced_test]
+#[test]
+fn recovery_populates_fallback_contexts_for_uncommitted_add() {
+    use crate::log_entry::LogEntry;
+
+    // Simulate recovery with 2 entries: one committed Empty at index 1,
+    // and one uncommitted ConfChange(Add) at index 2.
+    let entries = vec![
+        LogEntry::new(1, 1, ProposeId(0, 0), EntryData::<TestCommand>::Empty),
+        LogEntry::new(
+            2,
+            1,
+            ProposeId(0, 1),
+            vec![ConfChange::add(
+                99,
+                vec!["http://new-node:2380".to_owned()],
+            )
+            .with_member_state(
+                "new-node".to_owned(),
+                vec!["http://new-node:2379".to_owned()],
+                false,
+            )],
+        ),
+    ];
+
+    // last_applied=1 means entry at index 1 is committed, index 2 is uncommitted
+    let curp = build_recovered_curp(3, 1, entries);
+
+    // The uncommitted ConfChange at index 2 should have a fallback context
+    let log_r = curp.log.read();
+    assert!(
+        log_r.fallback_contexts.contains_key(&2),
+        "fallback context should exist for uncommitted ConfChange at index 2"
+    );
+    let ctx = &log_r.fallback_contexts[&2];
+    assert_eq!(ctx.origin_entry.index, 2);
+    // For Add, fallback info should have empty addrs (remove will be used to undo)
+    assert!(ctx.addrs.is_empty());
+}
+
+#[traced_test]
+#[test]
+fn recovery_populates_fallback_contexts_for_uncommitted_remove() {
+    use crate::log_entry::LogEntry;
+
+    // Simulate recovery with an uncommitted Remove at index 2.
+    // The ConfChange carries the removed member's state (Phase 1 enrichment).
+    let entries = vec![
+        LogEntry::new(1, 1, ProposeId(0, 0), EntryData::<TestCommand>::Empty),
+        LogEntry::new(
+            2,
+            1,
+            ProposeId(0, 1),
+            vec![ConfChange::remove(99).with_member_state(
+                "removed-node".to_owned(),
+                vec!["http://removed:2379".to_owned()],
+                false,
+            )],
+        ),
+    ];
+
+    let curp = build_recovered_curp(3, 1, entries);
+
+    let log_r = curp.log.read();
+    assert!(log_r.fallback_contexts.contains_key(&2));
+    let ctx = &log_r.fallback_contexts[&2];
+    // For Remove, fallback should carry the member's state for re-adding
+    assert_eq!(ctx.name, "removed-node");
+    assert_eq!(ctx.client_urls, vec!["http://removed:2379".to_owned()]);
+}
+
+#[traced_test]
+#[test]
+fn recovery_skips_committed_conf_change_entries() {
+    use crate::log_entry::LogEntry;
+
+    // Both entries are committed (last_applied=2), so no fallback contexts needed
+    let entries = vec![
+        LogEntry::new(1, 1, ProposeId(0, 0), EntryData::<TestCommand>::Empty),
+        LogEntry::new(
+            2,
+            1,
+            ProposeId(0, 1),
+            vec![ConfChange::add(
+                99,
+                vec!["http://new-node:2380".to_owned()],
+            )],
+        ),
+    ];
+
+    let curp = build_recovered_curp(3, 2, entries);
+
+    let log_r = curp.log.read();
+    assert!(
+        log_r.fallback_contexts.is_empty(),
+        "committed conf changes should not have fallback contexts"
+    );
+}
+
+#[traced_test]
+#[test]
+fn recovery_populates_fallback_for_multiple_uncommitted_conf_changes() {
+    use crate::log_entry::LogEntry;
+
+    // Index 1: committed Empty
+    // Index 2: uncommitted Add
+    // Index 3: uncommitted Promote (for same node)
+    let entries = vec![
+        LogEntry::new(1, 1, ProposeId(0, 0), EntryData::<TestCommand>::Empty),
+        LogEntry::new(
+            2,
+            1,
+            ProposeId(0, 1),
+            vec![ConfChange::add_learner(
+                99,
+                vec!["http://new-node:2380".to_owned()],
+            )
+            .with_member_state(
+                "new-node".to_owned(),
+                vec!["http://new-node:2379".to_owned()],
+                true,
+            )],
+        ),
+        LogEntry::new(3, 1, ProposeId(0, 2), vec![ConfChange::promote(99)]),
+    ];
+
+    let curp = build_recovered_curp(3, 1, entries);
+
+    let log_r = curp.log.read();
+    assert!(
+        log_r.fallback_contexts.contains_key(&2),
+        "fallback context should exist for Add at index 2"
+    );
+    assert!(
+        log_r.fallback_contexts.contains_key(&3),
+        "fallback context should exist for Promote at index 3"
+    );
+    // Non-conf-change (index 1) should not have fallback
+    assert!(!log_r.fallback_contexts.contains_key(&1));
+}

@@ -47,7 +47,18 @@
         instead of panicking with `unreachable!()`
       - Added 6 new tests: 2 for ClusterInfo::update(), 4 for defensive switch_config
         and fallback behavior with missing members
-    - [ ] Phase 3: Update recovery and snapshot installation paths (~40-80 LOC)
+    - [x] Phase 3: Fix recovery path for uncommitted conf changes (~80 LOC)
+      - **Bug found:** After crash recovery, uncommitted ConfChange entries restored from
+        WAL had no `FallbackContext`. When a new leader's AppendEntries overwrites these
+        entries, `handle_append_entries()` panicked at `unreachable!()` trying to look up
+        the missing fallback context.
+      - **Fix:** In `build_raw_curp()`, after restoring log entries, scan uncommitted entries
+        (index > commit_index) for ConfChange entries and populate their fallback contexts
+        using data from the ConfChange entry itself (Phase 1 enrichment) and current
+        cluster_info state.
+      - Added `build_fallback_context_from_conf_change()` helper method on RawCurp
+      - Added 4 new recovery tests: uncommitted Add, uncommitted Remove, committed
+        entries skipped, multiple uncommitted conf changes
     - [ ] Phase 4: Additional integration tests for conf change consistency (~60-100 LOC)
 
 - [x] **FIXME: Snapshot validation logic correctness**
