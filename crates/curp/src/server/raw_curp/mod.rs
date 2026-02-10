@@ -549,15 +549,26 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             .first()
             .unwrap_or_else(|| unreachable!("no propose in proposes"))
             .2;
-        let mut log_entries = Vec::with_capacity(proposes.len());
-        let mut to_process = Vec::with_capacity(proposes.len());
+        // Pre-allocate entries and compute sizes outside the lock
+        let prepared: Vec<_> = proposes
+            .iter()
+            .map(|(cmd, id, _term, _)| {
+                Log::<C>::prepare_entry(term, *id, Arc::clone(cmd))
+            })
+            .collect();
+        let resp_txs: Vec<_> = proposes
+            .into_iter()
+            .map(|(_, _, _, resp_tx)| resp_tx)
+            .collect();
+
+        let mut log_entries = Vec::with_capacity(prepared.len());
+        let mut to_process = Vec::with_capacity(prepared.len());
         let mut log_w = self.log.write();
         self.ctx.resp_txs.map_lock(|mut tx_queue| {
-            for propose in proposes {
-                let (cmd, id, _term, resp_tx) = propose;
-                let entry = log_w.push(term, id, cmd);
-                let index = entry.index;
+            for (prep, resp_tx) in prepared.into_iter().zip(resp_txs) {
                 let conflict = resp_tx.is_conflict();
+                let entry = log_w.push_prepared(prep);
+                let index = entry.index;
                 to_process.push((index, conflict));
                 log_entries.push(entry);
                 tx_queue.push_back((index, Arc::clone(&resp_tx)));
@@ -644,8 +655,9 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
             return Err(CurpError::LeaderTransfer("leader transferring".to_owned()));
         }
         self.deduplicate(propose_id, None)?;
+        let prepared = Log::<C>::prepare_entry(st_r.term, propose_id, EntryData::Shutdown);
         let mut log_w = self.log.write();
-        let entry = log_w.push(st_r.term, propose_id, EntryData::Shutdown);
+        let entry = log_w.push_prepared(prepared);
         debug!("{} gets new log[{}]", self.id(), entry.index);
         self.entry_process_single(&mut log_w, entry.as_ref(), true, st_r.term);
 
@@ -678,8 +690,9 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         self.check_new_config(&conf_changes)?;
 
         self.deduplicate(propose_id, None)?;
+        let prepared = Log::<C>::prepare_entry(st_r.term, propose_id, conf_changes.clone());
         let mut log_w = self.log.write();
-        let entry = log_w.push(st_r.term, propose_id, conf_changes.clone());
+        let entry = log_w.push_prepared(prepared);
         debug!("{} gets new log[{}]", self.id(), entry.index);
         let apply_opt = self.apply_conf_change(conf_changes);
         self.ctx
@@ -716,8 +729,9 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
 
         self.deduplicate(req.propose_id(), None)?;
 
+        let prepared = Log::<C>::prepare_entry(st_r.term, req.propose_id(), req);
         let mut log_w = self.log.write();
-        let entry = log_w.push(st_r.term, req.propose_id(), req);
+        let entry = log_w.push_prepared(prepared);
         debug!("{} gets new log[{}]", self.id(), entry.index);
         self.entry_process_single(&mut log_w, entry.as_ref(), false, st_r.term);
 
@@ -1048,12 +1062,13 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         // vote is granted by the majority of servers, can become leader
         let spec_pools = cst_w.sps.drain().collect();
         drop(cst_w);
+        // TODO: Generate client id in the same way as client
+        let propose_id = ProposeId(rand::random(), 0);
+        let prepared = Log::<C>::prepare_entry(st_w.term, propose_id, EntryData::Empty);
         let mut log_w = self.log.write();
 
         let prev_last_log_index = log_w.last_log_index();
-        // TODO: Generate client id in the same way as client
-        let propose_id = ProposeId(rand::random(), 0);
-        let entry = log_w.push(st_w.term, propose_id, EntryData::Empty);
+        let entry = log_w.push_prepared(prepared);
         self.persistent_log_entries(&[&entry], &log_w);
         self.recover_from_spec_pools(&st_w, &mut log_w, spec_pools);
         self.recover_ucp_from_log(&log_w);
@@ -1854,7 +1869,6 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
         let mut entries = vec![];
         for entry in recovered_cmds {
             let _ig_spec = sp_l.insert(entry.clone()); // may have been inserted before
-            #[allow(clippy::expect_used)]
             let entry = log.push(term, entry.id, entry.cmd);
             debug!(
                 "{} recovers speculatively executed cmd({}) in log[{}]",

@@ -214,5 +214,11 @@
 - [ ] **TODO: Add mutex on metrics path**
   - File: `crates/xline/src/metrics.rs:172`
 
-- [ ] **TODO: Avoid allocation during locking in log**
+- [x] **TODO: Avoid allocation during locking in log**
   - File: `crates/curp/src/server/raw_curp/log.rs:447`
+  - **Fixed:** Split `Log::push()` into `prepare_entry()` (allocates Arc, computes bincode size
+    outside the lock) and `push_prepared()` (assigns sequential index and inserts under the lock).
+    Updated 4 callers (`push_logs`, `handle_shutdown`, `handle_propose_conf_change`,
+    `handle_publish`, `become_candidate`) to prepare entries before acquiring the write lock.
+    The convenience `push()` method is retained for callers that already hold the lock.
+    Added 2 unit tests verifying index assignment and size consistency.

@@ -31,6 +31,16 @@ struct Entry<C: Command> {
     size: u64,
 }
 
+/// A pre-allocated log entry whose Arc allocation and bincode size computation
+/// were performed outside the log write lock. The `index` field is a placeholder
+/// (0) that will be set to the correct value when pushed into the log.
+pub(super) struct PreparedEntry<C: Command> {
+    /// The pre-allocated log entry (with placeholder index 0)
+    entry: Arc<LogEntry<C>>,
+    /// Pre-computed bincode serialized size
+    size: u64,
+}
+
 /// Enum representing a range of values in the log.
 #[derive(Debug, Eq, PartialEq)]
 enum LogRange<T> {
@@ -452,20 +462,51 @@ impl<C: Command> Log<C> {
         }
     }
 
-    /// Push a log entry into the end of log
-    // TODO: Avoid allocation during locking
+    /// Pre-allocate a log entry outside the write lock. The returned
+    /// `PreparedEntry` holds an `Arc<LogEntry>` with placeholder index 0
+    /// and the pre-computed bincode serialized size. Call `push_prepared()`
+    /// under the lock to assign the real index and insert into the log.
+    ///
+    /// Since bincode uses fixed-width encoding for `u64`, the serialized
+    /// size is identical regardless of the index value.
+    pub(super) fn prepare_entry(
+        term: u64,
+        propose_id: ProposeId,
+        entry: impl Into<EntryData<C>>,
+    ) -> PreparedEntry<C> {
+        let entry = Arc::new(LogEntry::new(0, term, propose_id, entry));
+        let size = bincode::serialized_size(&entry)
+            .unwrap_or_else(|_| unreachable!("bincode serialization should always succeed"));
+        PreparedEntry { entry, size }
+    }
+
+    /// Push a pre-allocated entry into the log, assigning it the next
+    /// sequential index. Only the index assignment and VecDeque push
+    /// happen under the lock — allocation and size computation were
+    /// done in `prepare_entry()`.
+    pub(super) fn push_prepared(
+        &mut self,
+        mut prepared: PreparedEntry<C>,
+    ) -> Arc<LogEntry<C>> {
+        let index = self.last_log_index() + 1;
+        Arc::get_mut(&mut prepared.entry)
+            .unwrap_or_else(|| unreachable!("PreparedEntry should hold the only Arc reference"))
+            .index = index;
+        self.push_back(Arc::clone(&prepared.entry), prepared.size);
+        prepared.entry
+    }
+
+    /// Convenience method that allocates and pushes in one call.
+    /// Prefer `prepare_entry()` + `push_prepared()` when the caller
+    /// can perform allocation outside the write lock.
     pub(super) fn push(
         &mut self,
         term: u64,
         propose_id: ProposeId,
         entry: impl Into<EntryData<C>>,
     ) -> Arc<LogEntry<C>> {
-        let index = self.last_log_index() + 1;
-        let entry = Arc::new(LogEntry::new(index, term, propose_id, entry));
-        let size = bincode::serialized_size(&entry)
-            .unwrap_or_else(|_| unreachable!("bindcode serialization should always succeed"));
-        self.push_back(Arc::clone(&entry), size);
-        entry
+        let prepared = Self::prepare_entry(term, propose_id, entry);
+        self.push_prepared(prepared)
     }
 
     /// check whether the log entry range [li,..) exceeds the batch limit or not
@@ -1006,5 +1047,68 @@ mod tests {
         for i in 10..15 {
             assert!(log.contains_cmd_id(&ProposeId(0, i)));
         }
+    }
+
+    #[test]
+    fn push_prepared_assigns_correct_sequential_indices() {
+        let mut log = Log::<TestCommand>::new(default_batch_max_size(), default_log_entries_cap());
+
+        // Prepare entries with placeholder index 0
+        let prep1 = Log::<TestCommand>::prepare_entry(
+            1,
+            ProposeId(0, 1),
+            Arc::new(TestCommand::default()),
+        );
+        let prep2 = Log::<TestCommand>::prepare_entry(
+            1,
+            ProposeId(0, 2),
+            Arc::new(TestCommand::default()),
+        );
+        let prep3 = Log::<TestCommand>::prepare_entry(
+            1,
+            ProposeId(0, 3),
+            Arc::new(TestCommand::default()),
+        );
+
+        // push_prepared should assign sequential indices
+        let entry1 = log.push_prepared(prep1);
+        assert_eq!(entry1.index, 1);
+        let entry2 = log.push_prepared(prep2);
+        assert_eq!(entry2.index, 2);
+        let entry3 = log.push_prepared(prep3);
+        assert_eq!(entry3.index, 3);
+
+        // Entries should be retrievable by their assigned indices
+        assert_eq!(log.get(1).unwrap().propose_id, ProposeId(0, 1));
+        assert_eq!(log.get(2).unwrap().propose_id, ProposeId(0, 2));
+        assert_eq!(log.get(3).unwrap().propose_id, ProposeId(0, 3));
+
+        // cmd_ids cache should be updated
+        assert!(log.contains_cmd_id(&ProposeId(0, 1)));
+        assert!(log.contains_cmd_id(&ProposeId(0, 2)));
+        assert!(log.contains_cmd_id(&ProposeId(0, 3)));
+    }
+
+    #[test]
+    fn push_prepared_size_matches_push() {
+        // Verify that the pre-computed size from prepare_entry matches
+        // what push() would have computed (since bincode uses fixed-width u64)
+        let mut log1 = Log::<TestCommand>::new(default_batch_max_size(), default_log_entries_cap());
+        let mut log2 = Log::<TestCommand>::new(default_batch_max_size(), default_log_entries_cap());
+
+        let cmd = Arc::new(TestCommand::default());
+
+        // Push via convenience method
+        let entry1 = log1.push(1, ProposeId(0, 1), Arc::clone(&cmd));
+        // Push via prepare + push_prepared
+        let prep = Log::<TestCommand>::prepare_entry(1, ProposeId(0, 1), cmd);
+        let entry2 = log2.push_prepared(prep);
+
+        // Both entries should have the same index
+        assert_eq!(entry1.index, entry2.index);
+
+        // Both logs should have the same internal size tracking
+        assert_eq!(log1.entries.len(), log2.entries.len());
+        assert_eq!(log1.entries[0].size, log2.entries[0].size);
     }
 }
