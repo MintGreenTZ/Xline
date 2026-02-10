@@ -312,12 +312,12 @@ impl Lease for LeaseServer {
             // a follower when it lost the election. Therefore we need to double check here.
             // We can directly invoke leader_keep_alive when a candidate becomes a leader.
             if !self.lease_storage.is_primary() {
-                let leader_addrs = self.cluster_info.client_urls(leader_id).unwrap_or_else(|| {
-                    unreachable!(
-                        "The address of leader {} not found in all_members {:?}",
-                        leader_id, self.cluster_info
-                    )
-                });
+                let leader_addrs = self.cluster_info.client_urls(leader_id).ok_or_else(|| {
+                    tonic::Status::unavailable(format!(
+                        "leader {} not found in cluster membership",
+                        leader_id,
+                    ))
+                })?;
                 break self
                     .follower_keep_alive(request_stream, &leader_addrs)
                     .await?;
@@ -356,12 +356,12 @@ impl Lease for LeaseServer {
                 return Ok(tonic::Response::new(res));
             }
             let leader_id = self.client.fetch_leader_id(false).await?;
-            let leader_addrs = self.cluster_info.client_urls(leader_id).unwrap_or_else(|| {
-                unreachable!(
-                    "The address of leader {} not found in all_members {:?}",
-                    leader_id, self.cluster_info
-                )
-            });
+            let leader_addrs = self.cluster_info.client_urls(leader_id).ok_or_else(|| {
+                tonic::Status::unavailable(format!(
+                    "leader {} not found in cluster membership",
+                    leader_id,
+                ))
+            })?;
             if !self.lease_storage.is_primary() {
                 let endpoints = build_endpoints(&leader_addrs, self.client_tls_config.as_ref())?;
                 let channel = tonic::transport::Channel::balance_list(endpoints.into_iter());

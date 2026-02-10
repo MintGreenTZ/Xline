@@ -211,16 +211,17 @@ impl ClusterInfo {
         self.members.get(id)
     }
 
-    /// Update a member and return old addrs
+    /// Update a member's peer urls and return old addrs.
+    ///
+    /// Returns `None` if the member does not exist (e.g., after a crash where
+    /// cluster_info was reconstructed from persistent storage that is ahead of
+    /// the log replay).
     #[inline]
-    pub fn update(&self, id: &ServerId, addrs: impl Into<Vec<String>>) -> Vec<String> {
+    pub fn update(&self, id: &ServerId, addrs: impl Into<Vec<String>>) -> Option<Vec<String>> {
         let mut addrs = addrs.into();
-        let mut member = self
-            .members
-            .get_mut(id)
-            .unwrap_or_else(|| unreachable!("member {} not found", id));
+        let mut member = self.members.get_mut(id)?;
         std::mem::swap(&mut addrs, &mut member.peer_urls);
-        addrs
+        Some(addrs)
     }
 
     /// Get server peer urls via server id
@@ -488,6 +489,36 @@ mod tests {
 
         assert_eq!(node1.cluster_id(), node2.cluster_id());
         assert_eq!(node3.cluster_id(), node2.cluster_id());
+    }
+
+    #[test]
+    fn test_update_returns_none_for_missing_member() {
+        let all_members = HashMap::from([
+            ("S1".to_owned(), vec!["S1".to_owned()]),
+            ("S2".to_owned(), vec!["S2".to_owned()]),
+        ]);
+        let node = ClusterInfo::from_members_map(all_members, [], "S1");
+
+        // Updating a non-existent member should return None, not panic
+        let result = node.update(&999, vec!["new_addr".to_owned()]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_update_returns_old_addrs_for_existing_member() {
+        let all_members = HashMap::from([
+            ("S1".to_owned(), vec!["S1".to_owned()]),
+            ("S2".to_owned(), vec!["S2".to_owned()]),
+        ]);
+        let node = ClusterInfo::from_members_map(all_members, [], "S1");
+        let s2_id = node.get_id_by_name("S2").unwrap();
+
+        let old = node.update(&s2_id, vec!["new_addr".to_owned()]);
+        assert_eq!(old, Some(vec!["S2".to_owned()]));
+
+        // Verify the update took effect
+        let urls = node.peer_urls(s2_id).unwrap();
+        assert_eq!(urls, vec!["new_addr".to_owned()]);
     }
 
     #[test]

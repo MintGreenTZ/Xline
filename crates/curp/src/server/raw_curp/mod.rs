@@ -1604,28 +1604,45 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 }
             }
             ConfChangeType::Update => {
-                _ = self
+                if let Some(old_addrs) = self
                     .ctx
                     .cluster_info
-                    .update(&node_id, info.addrs.clone());
-                let m = self.ctx.cluster_info.get(&node_id).unwrap_or_else(|| {
-                    unreachable!("node {} should exist in cluster info", node_id)
-                });
-                let _ig = self.ctx.curp_storage.put_member(&*m);
-                Some(ConfChange::update(node_id, info.addrs))
+                    .update(&node_id, info.addrs.clone())
+                {
+                    let m = self.ctx.cluster_info.get(&node_id).unwrap_or_else(|| {
+                        unreachable!("member {} must exist after successful update", node_id)
+                    });
+                    let _ig = self.ctx.curp_storage.put_member(&*m);
+                    _ = old_addrs;
+                    Some(ConfChange::update(node_id, info.addrs))
+                } else {
+                    warn!(
+                        "node {} not found in cluster_info during Update fallback, skipping",
+                        node_id
+                    );
+                    None
+                }
             }
             ConfChangeType::Promote => {
-                self.cst.map_lock(|mut cst_l| {
-                    _ = cst_l.config.remove(node_id);
-                    _ = cst_l.config.insert(node_id, true);
-                });
-                self.ctx.cluster_info.demote(node_id);
-                self.lst.demote(node_id);
-                let m = self.ctx.cluster_info.get(&node_id).unwrap_or_else(|| {
-                    unreachable!("node {} should exist in cluster info", node_id)
-                });
-                let _ig = self.ctx.curp_storage.put_member(&*m);
-                None
+                if self.ctx.cluster_info.get(&node_id).is_some() {
+                    self.cst.map_lock(|mut cst_l| {
+                        _ = cst_l.config.remove(node_id);
+                        _ = cst_l.config.insert(node_id, true);
+                    });
+                    self.ctx.cluster_info.demote(node_id);
+                    self.lst.demote(node_id);
+                    let m = self.ctx.cluster_info.get(&node_id).unwrap_or_else(|| {
+                        unreachable!("member {} must exist after successful demote", node_id)
+                    });
+                    let _ig = self.ctx.curp_storage.put_member(&*m);
+                    None
+                } else {
+                    warn!(
+                        "node {} not found in cluster_info during Promote fallback, skipping",
+                        node_id
+                    );
+                    None
+                }
             }
         };
         self.ctx.cluster_info.cluster_version_update();
@@ -2054,12 +2071,19 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 )
             }
             ConfChangeType::Update => {
-                let old_addrs = self
+                let Some(old_addrs) = self
                     .ctx
                     .cluster_info
-                    .update(&node_id, conf_change.address.clone());
+                    .update(&node_id, conf_change.address.clone())
+                else {
+                    warn!(
+                        "node {} not found in cluster_info during Update conf change, skipping",
+                        node_id
+                    );
+                    return None;
+                };
                 let m = self.ctx.cluster_info.get(&node_id).unwrap_or_else(|| {
-                    unreachable!("the member should exist after update");
+                    unreachable!("member {} must exist after successful update", node_id)
                 });
                 let _ig = self.ctx.curp_storage.put_member(&*m);
                 (
@@ -2073,16 +2097,23 @@ impl<C: Command, RC: RoleChange> RawCurp<C, RC> {
                 )
             }
             ConfChangeType::Promote => {
+                let modified = self.ctx.cluster_info.promote(node_id);
+                if !modified {
+                    warn!(
+                        "node {} not found in cluster_info during Promote conf change, skipping",
+                        node_id
+                    );
+                    return None;
+                }
                 _ = cst_l.config.learners.remove(&node_id);
                 _ = cst_l.config.insert(node_id, false);
                 self.lst.promote(node_id);
-                let modified = self.ctx.cluster_info.promote(node_id);
                 let m = self.ctx.cluster_info.get(&node_id).unwrap_or_else(|| {
-                    unreachable!("the member should exist after promote");
+                    unreachable!("member {} must exist after successful promote", node_id)
                 });
                 let _ig = self.ctx.curp_storage.put_member(&*m);
                 (
-                    modified,
+                    true,
                     Some(FallbackInfo {
                         addrs: vec![],
                         name: String::new(),

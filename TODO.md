@@ -36,7 +36,17 @@
       - Updated `fallback_conf_change()` to restore `client_urls` when undoing Remove ops
       - Added `client_urls` field to `FallbackContext` in `log.rs`
       - Added 3 new tests + updated 4 existing tests
-    - [ ] Phase 2: Audit all `ctx.cluster_info` usages for consistency (~80-120 LOC)
+    - [x] Phase 2: Audit all `ctx.cluster_info` usages for defensive handling (~80 LOC)
+      - Audited every `ctx.cluster_info` read/write across the codebase (25+ call sites)
+      - Changed `ClusterInfo::update()` from panicking to returning `Option<Vec<String>>`
+      - Made `switch_config()` Update/Promote branches return `None` gracefully when
+        the target member is missing (crash recovery can leave cluster_info inconsistent)
+      - Made `fallback_conf_change()` Update/Promote branches skip safely when member
+        is missing instead of panicking
+      - Fixed `lease_server.rs` leader address lookups to return `tonic::Status::unavailable`
+        instead of panicking with `unreachable!()`
+      - Added 6 new tests: 2 for ClusterInfo::update(), 4 for defensive switch_config
+        and fallback behavior with missing members
     - [ ] Phase 3: Update recovery and snapshot installation paths (~40-80 LOC)
     - [ ] Phase 4: Additional integration tests for conf change consistency (~60-100 LOC)
 

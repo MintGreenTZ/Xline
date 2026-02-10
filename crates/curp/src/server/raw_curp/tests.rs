@@ -963,6 +963,87 @@ fn remove_fallback_restores_client_urls() {
 
 #[traced_test]
 #[test]
+fn switch_config_update_missing_member_returns_none() {
+    let task_manager = Arc::new(TaskManager::new());
+    let curp = { Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager)) };
+
+    // Try to update a non-existent node — should return None, not panic
+    let cc = ConfChange::update(99999, vec!["http://10.0.0.99:2380".to_owned()]);
+    let result = curp.switch_config(cc);
+    assert!(result.is_none(), "Update of missing member should return None");
+}
+
+#[traced_test]
+#[test]
+fn switch_config_promote_missing_member_returns_none() {
+    let task_manager = Arc::new(TaskManager::new());
+    let curp = { Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager)) };
+
+    // Try to promote a non-existent node — should return None, not panic
+    let cc = ConfChange::promote(99999);
+    let result = curp.switch_config(cc);
+    assert!(result.is_none(), "Promote of missing member should return None");
+}
+
+#[traced_test]
+#[test]
+fn fallback_update_missing_member_does_not_panic() {
+    let task_manager = Arc::new(TaskManager::new());
+    let curp = { Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager)) };
+
+    // Add a member, then remove it so it's gone
+    let cc = ConfChange::add(1, vec!["http://10.0.0.5:2380".to_owned()]).with_member_state(
+        "node-5".to_owned(),
+        vec!["http://10.0.0.5:2379".to_owned()],
+        false,
+    );
+    curp.switch_config(cc);
+    curp.switch_config(ConfChange::remove(1));
+    assert!(!curp.contains(1));
+
+    // Attempting to fallback an Update for the now-missing member should not panic
+    let changes = vec![ConfChange::update(1, vec!["http://10.0.0.5:2380".to_owned()])];
+    let info = FallbackInfo {
+        addrs: vec!["http://old:2380".to_owned()],
+        name: String::new(),
+        client_urls: vec![],
+        is_learner: false,
+    };
+    curp.fallback_conf_change(changes, info);
+    // Should complete without panicking
+}
+
+#[traced_test]
+#[test]
+fn fallback_promote_missing_member_does_not_panic() {
+    let task_manager = Arc::new(TaskManager::new());
+    let curp = { Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager)) };
+
+    // Add a learner, then remove it
+    let cc =
+        ConfChange::add_learner(1, vec!["http://10.0.0.5:2380".to_owned()]).with_member_state(
+            "learner-5".to_owned(),
+            vec!["http://10.0.0.5:2379".to_owned()],
+            true,
+        );
+    curp.switch_config(cc);
+    curp.switch_config(ConfChange::remove(1));
+    assert!(!curp.contains(1));
+
+    // Attempting to fallback a Promote for the now-missing member should not panic
+    let changes = vec![ConfChange::promote(1)];
+    let info = FallbackInfo {
+        addrs: vec![],
+        name: String::new(),
+        client_urls: vec![],
+        is_learner: false,
+    };
+    curp.fallback_conf_change(changes, info);
+    // Should complete without panicking
+}
+
+#[traced_test]
+#[test]
 fn leader_handle_move_leader() {
     let task_manager = Arc::new(TaskManager::new());
     let curp = { Arc::new(RawCurp::new_test(3, mock_role_change(), task_manager)) };
