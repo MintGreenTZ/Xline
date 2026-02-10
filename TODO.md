@@ -159,8 +159,16 @@
     variables, handled `#[must_use]` results properly, and converted a doc comment on `thread_local!` to
     a regular comment.
 
-- [ ] **TODO: Fix 8-bit alignment in WAL codec**
+- [x] **TODO: Fix 8-byte alignment in WAL codec**
   - File: `crates/curp/src/server/storage/wal/codec.rs:105`
+  - **Fixed:** Implemented 8-byte alignment for WAL Entry frames to prevent torn writes.
+    Entry frame payloads are now padded to the next 8-byte boundary. The padding length
+    (1-7 bytes) is encoded into bits 48-55 of the 7-byte header length field (bit 7 = flag,
+    bits 0-2 = pad count). Seal frames (8 bytes) and Commit frames (40 bytes) were already
+    aligned. Added `decode_frame_size()` to extract padding info during decoding, and updated
+    `encode_frame_size()` to use bits 48-55 (not 56-63, since only 7 header bytes are stored).
+    Added 7 unit tests covering encode/decode roundtrips, alignment verification, multi-frame
+    batches, and corrupted-padding checksum detection.
 
 ## Low Priority
 

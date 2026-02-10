@@ -100,16 +100,38 @@ impl<C> WAL<C> {
 
     /// Gets encoded length and padding length
     ///
-    /// This is used to prevent torn write by forcing 8-bit alignment
-    #[allow(unused, clippy::arithmetic_side_effects)] // TODO: 8bit alignment
+    /// This is used to prevent torn write by forcing 8-byte alignment.
+    /// The padding length is encoded into byte 6 (bits 48-55) of the
+    /// length field, which is the highest byte stored in the 7-byte header.
+    /// Bit 7 of that byte indicates padding is present, and bits 0-2
+    /// store the number of padding bytes (1-7).
+    #[allow(clippy::arithmetic_side_effects)]
     fn encode_frame_size(data_len: usize) -> (usize, usize) {
         let mut encoded_len = data_len;
         let pad_len = (8 - data_len % 8) % 8;
         if pad_len != 0 {
-            // encode padding info
-            encoded_len |= (0x80 | pad_len) << 56;
+            // encode padding info in byte 6 (bits 48-55): set bit 7 + padding length
+            encoded_len |= (0x80 | pad_len) << 48;
         }
         (encoded_len, pad_len)
+    }
+
+    /// Decodes the length and padding from a raw header value
+    ///
+    /// Returns `(data_len, pad_len)` where `data_len` is the actual payload
+    /// length and `pad_len` is the number of padding bytes to skip.
+    /// The padding info is stored in bits 48-55 (byte 6 of the 7-byte LE
+    /// length field in the header).
+    #[allow(clippy::arithmetic_side_effects)]
+    fn decode_frame_size(raw: u64) -> (usize, usize) {
+        let high_byte: usize = ((raw >> 48) & 0xFF).numeric_cast();
+        if high_byte & 0x80 != 0 {
+            let pad_len = high_byte & 0x07;
+            let data_len: usize = (raw & 0x0000_FFFF_FFFF_FFFF).numeric_cast();
+            (data_len, pad_len)
+        } else {
+            (raw.numeric_cast(), 0)
+        }
     }
 }
 
@@ -184,8 +206,13 @@ where
     ///
     /// 0      1      2      3      4      5      6      7      8
     /// |------+------+------+------+------+------+------+------|
-    /// | Type | Length / Index / Reserved                      |
+    /// | Type | Length / Index (6 bytes)          | Pad  |
     /// |------+------+------+------+------+------+------+------|
+    ///
+    /// For Entry frames, byte 7 encodes padding info for 8-byte alignment:
+    ///   bit 7: padding flag (1 = padding present)
+    ///   bits 0-2: number of padding bytes (1-7)
+    /// The actual payload length is stored in bytes 1-6 (48 bits).
     ///
     /// * The frame types
     ///
@@ -221,17 +248,19 @@ where
         header: [u8; FRAME_HEADER_SIZE],
         src: &[u8],
     ) -> Result<Option<(Self, usize)>, WALError> {
-        let len: usize = Self::decode_u64_from_header(header).numeric_cast();
-        if src.len() < len {
+        let raw = Self::decode_u64_from_header(header);
+        let (data_len, pad_len) = WAL::<C>::decode_frame_size(raw);
+        let total_len = data_len + pad_len;
+        if src.len() < total_len {
             return Ok(None);
         }
-        let payload = &src[..len];
+        let payload = &src[..data_len];
         let entry: LogEntry<C> = bincode::deserialize(payload)
             .map_err(|e| WALError::Corrupted(CorruptType::Codec(e.to_string())))?;
 
         Ok(Some((
             Self::Data(DataFrameOwned::Entry(entry)),
-            FRAME_HEADER_SIZE + len,
+            FRAME_HEADER_SIZE + total_len,
         )))
     }
 
@@ -262,8 +291,8 @@ where
 
     /// Gets a u64 from the header
     ///
-    /// NOTE: The u64 is encoded using 7 bytes, it can be either a length
-    /// or a log index that is smaller than `2^56`
+    /// NOTE: The u64 is encoded using 7 bytes (bits 0-55). For entry frames,
+    /// bits 48-55 may contain padding info (see `decode_frame_size`).
     fn decode_u64_from_header(mut header: [u8; FRAME_HEADER_SIZE]) -> u64 {
         header.rotate_left(1);
         header[7] = 0;
@@ -305,15 +334,18 @@ where
                 let entry_bytes = bincode::serialize(entry)
                     .unwrap_or_else(|_| unreachable!("serialization should never fail"));
                 let len = entry_bytes.len();
-                assert_eq!(len >> 56, 0, "log entry length: {len} too large");
-                let mut bytes = Vec::with_capacity(FRAME_HEADER_SIZE + entry_bytes.len());
+                assert_eq!(len >> 48, 0, "log entry length: {len} too large");
+                let (encoded_len, pad_len) = WAL::<C>::encode_frame_size(len);
+                let mut bytes =
+                    Vec::with_capacity(FRAME_HEADER_SIZE + entry_bytes.len() + pad_len);
                 bytes.push(self.frame_type());
-                bytes.extend_from_slice(&len.to_le_bytes()[..7]);
+                bytes.extend_from_slice(&encoded_len.to_le_bytes()[..7]);
                 bytes.extend_from_slice(&entry_bytes);
+                bytes.extend_from_slice(&[0; 7][..pad_len]);
                 bytes
             }
             DataFrame::SealIndex(index) => {
-                assert_eq!(index >> 56, 0, "log index: {index} too large");
+                assert_eq!(index >> 48, 0, "log index: {index} too large");
                 let mut bytes = index.to_le_bytes();
                 bytes.rotate_right(1);
                 bytes[0] = self.frame_type();
@@ -411,5 +443,117 @@ mod tests {
             matches!(err, WALError::Corrupted(_)),
             "error {err} not match"
         );
+    }
+
+    #[test]
+    fn encode_frame_size_no_padding_when_aligned() {
+        let (encoded_len, pad_len) = WAL::<TestCommand>::encode_frame_size(16);
+        assert_eq!(pad_len, 0);
+        assert_eq!(encoded_len, 16);
+    }
+
+    #[test]
+    fn encode_frame_size_adds_padding() {
+        let (encoded_len, pad_len) = WAL::<TestCommand>::encode_frame_size(13);
+        assert_eq!(pad_len, 3);
+        // high byte (bits 48-55) should have 0x83 (0x80 | 3)
+        let high_byte = (encoded_len >> 48) & 0xFF;
+        assert_eq!(high_byte, 0x83);
+        // low 48 bits should be the original length
+        assert_eq!(encoded_len & 0x0000_FFFF_FFFF_FFFF, 13);
+    }
+
+    #[test]
+    fn decode_frame_size_roundtrips() {
+        for data_len in [0, 1, 7, 8, 13, 16, 100, 255, 1024, 65535] {
+            let (encoded_len, expected_pad) = WAL::<TestCommand>::encode_frame_size(data_len);
+            let (decoded_len, decoded_pad) = WAL::<TestCommand>::decode_frame_size(
+                encoded_len as u64,
+            );
+            assert_eq!(decoded_len, data_len, "data_len mismatch for input {data_len}");
+            assert_eq!(decoded_pad, expected_pad, "pad_len mismatch for input {data_len}");
+        }
+    }
+
+    #[tokio::test]
+    async fn entry_frame_is_8_byte_aligned() {
+        let entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
+        let frame = DataFrame::Entry(&entry);
+        let encoded = frame.encode();
+        assert_eq!(
+            encoded.len() % 8, 0,
+            "encoded entry frame length {} is not 8-byte aligned",
+            encoded.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn padded_entry_frame_encode_decode_roundtrips() {
+        let mut codec = WAL::<TestCommand>::new();
+        let entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
+        let data_frame = DataFrameOwned::Entry(entry.clone());
+        let encoded = codec.encode(vec![data_frame.get_ref()]).unwrap();
+
+        // Verify the total encoded batch (data frame + commit frame) is 8-byte aligned
+        assert_eq!(
+            encoded.len() % 8, 0,
+            "total encoded length {} is not 8-byte aligned",
+            encoded.len()
+        );
+
+        let (frames, _) = codec.decode(&encoded).unwrap();
+        assert_eq!(frames.len(), 1);
+        let DataFrameOwned::Entry(ref decoded_entry) = frames[0] else {
+            panic!("expected Entry frame");
+        };
+        assert_eq!(*decoded_entry, entry);
+    }
+
+    #[tokio::test]
+    async fn multiple_padded_frames_decode_correctly() {
+        let mut codec = WAL::<TestCommand>::new();
+        let entry1 = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
+        let entry2 = LogEntry::<TestCommand>::new(2, 1, ProposeId(3, 4), EntryData::Empty);
+        let frame1 = DataFrameOwned::Entry(entry1.clone());
+        let frame2 = DataFrameOwned::Entry(entry2.clone());
+
+        // Encode two entry frames in one batch
+        let encoded = codec
+            .encode(vec![frame1.get_ref(), frame2.get_ref()])
+            .unwrap();
+
+        let (frames, _) = codec.decode(&encoded).unwrap();
+        assert_eq!(frames.len(), 2);
+        let DataFrameOwned::Entry(ref e1) = frames[0] else {
+            panic!("expected Entry frame");
+        };
+        let DataFrameOwned::Entry(ref e2) = frames[1] else {
+            panic!("expected Entry frame");
+        };
+        assert_eq!(*e1, entry1);
+        assert_eq!(*e2, entry2);
+    }
+
+    #[tokio::test]
+    async fn corrupted_padding_detected_by_checksum() {
+        let mut codec = WAL::<TestCommand>::new();
+        let entry = LogEntry::<TestCommand>::new(1, 1, ProposeId(1, 2), EntryData::Empty);
+        let data_frame = DataFrameOwned::Entry(entry.clone());
+        let mut encoded = codec.encode(vec![data_frame.get_ref()]).unwrap();
+
+        // Find the padding bytes (between payload end and commit frame start)
+        // and corrupt one of them
+        let payload_len = bincode::serialize(&entry).unwrap().len();
+        let (_, pad_len) = WAL::<TestCommand>::encode_frame_size(payload_len);
+        if pad_len > 0 {
+            let pad_start = FRAME_HEADER_SIZE + payload_len;
+            encoded[pad_start] = 0xFF; // corrupt a padding byte
+
+            let err = codec.decode(&encoded).unwrap_err();
+            assert!(
+                matches!(err, WALError::Corrupted(CorruptType::Checksum)),
+                "expected checksum error, got {err}"
+            );
+        }
     }
 }
